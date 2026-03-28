@@ -15,10 +15,14 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
     github_token: str = ""
 
-    # Anthropic
-    anthropic_api_key: str = ""
-    llm_model: str = "claude-haiku-4-5-20251001"
+    # LLM — set LLM_PROVIDER to "openai" or "anthropic"
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4o-mini"
     llm_max_tokens: int = 2048
+
+    # Provider credentials (only the one matching LLM_PROVIDER is required)
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
 
     # App
     log_level: str = "INFO"

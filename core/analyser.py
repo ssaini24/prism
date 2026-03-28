@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 from core.diff_parser import parse_diff
-from core.llm_client import LLMClient
+from core.llm_client import create_llm_client
 from models.review import ExtractedQuery, ReviewResult
 from reviewers.base_reviewer import BaseReviewer
 from reviewers.db_query.reviewer import DBQueryReviewer
@@ -22,7 +22,7 @@ class Analyser:
     """
 
     def __init__(self, reviewers: list[BaseReviewer] | None = None) -> None:
-        llm = LLMClient()
+        llm = create_llm_client()
         self._reviewers: list[BaseReviewer] = reviewers or [
             DBQueryReviewer(llm_client=llm),
         ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from core.llm_client import LLMClient
+from core.llm_client import LLMClient, create_llm_client
 from models.review import CostAnalysis, ExtractedQuery, Issue, ReviewResult
 from reviewers.base_reviewer import BaseReviewer
 from reviewers.db_query import prompts, rules
@@ -19,7 +19,7 @@ class DBQueryReviewer(BaseReviewer):
     """Reviews SQL queries for performance issues and anti-patterns."""
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
-        self._llm = llm_client or LLMClient()
+        self._llm = llm_client or create_llm_client()
 
     @property
     def name(self) -> str:

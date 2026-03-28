@@ -9,8 +9,8 @@ from fastapi.responses import JSONResponse
 
 from config import settings
 from core.analyser import Analyser
-from github.commenter import PRCommenter
-from github.webhook import extract_pr_info, verify_signature
+from gh.commenter import PRCommenter
+from gh.webhook import extract_pr_info, verify_signature
 
 # ---------------------------------------------------------------------------
 # Logging
