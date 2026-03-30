@@ -1,19 +1,19 @@
 # Prism
 
-AI-powered PR reviewer — DB query optimisation module.
+AI-powered PR reviewer — extensible, domain-specialist architecture.
 
 ## What it does
 
-Prism listens to GitHub PR webhooks, detects SQL query issues in the PR diff, and posts a structured review comment back to the PR. It is a db query reviewer.
+Prism listens to GitHub PR webhooks, detects SQL query issues in the PR diff, and posts structured review comments (inline + summary) back to the PR. Built as a platform for purpose-built AI reviewers — today SQL, tomorrow security, IaC, compliance, and more.
 
 ## Data flow
 
 ```
-GitHub webhook → main.py → webhook.py (HMAC verify)
+GitHub webhook → main.py → gh/webhook.py (HMAC-SHA256 verify)
                          → Analyser → diff_parser (extract SQL)
                                     → DBQueryReviewer
-                                        → rules.py (5 static checks)
-                                        → LLMClient → claude-haiku
+                                        → rules.py (6 static checks)
+                                        → LLMClient (OpenAI / Anthropic)
                                     → ReviewResult (strict JSON)
                          → PRCommenter → inline + summary PR comment
 ```
@@ -26,13 +26,12 @@ prism/
 ├── requirements.txt
 ├── Dockerfile                     # Multi-stage build (python:3.11-slim)
 ├── docker-compose.yml
-├── .dockerignore
 ├── .env.example
 │
 ├── core/
 │   ├── analyser.py                # Orchestrator — routes PR diff to reviewers
 │   ├── diff_parser.py             # Extracts SQL queries from unified diffs
-│   └── llm_client.py              # Anthropic SDK wrapper (JSON output helper)
+│   └── llm_client.py              # Multi-provider LLM client (OpenAI / Anthropic)
 │
 ├── reviewers/
 │   ├── base_reviewer.py           # Abstract base class for all reviewers
@@ -42,7 +41,7 @@ prism/
 │       ├── explain_parser.py      # Phase 2: EXPLAIN JSON parser (placeholder)
 │       └── prompts.py             # LLM prompt templates
 │
-├── github/
+├── gh/
 │   ├── webhook.py                 # Webhook receiver + HMAC-SHA256 validation
 │   └── commenter.py               # Posts inline + summary review comments
 │
@@ -70,7 +69,7 @@ prism/
 - FastAPI — webhook server
 - sqlglot — SQL AST parsing
 - PyGithub — GitHub API
-- Anthropic Python SDK — LLM (claude-haiku-4-5)
+- OpenAI / Anthropic Python SDK — pluggable LLM provider
 - pydantic-settings — config
 - Docker + docker-compose
 
@@ -78,11 +77,25 @@ prism/
 
 ```bash
 cp .env.example .env
-# Fill in GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN, ANTHROPIC_API_KEY
+# Fill in GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN
+# Set LLM_PROVIDER=openai or anthropic and the corresponding API key
 docker-compose up --build
 ```
 
 The app runs on port `8000`. GitHub should be configured to send `pull_request` events to `https://your-host/webhook/github`.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GITHUB_WEBHOOK_SECRET` | — | HMAC secret for webhook validation |
+| `GITHUB_TOKEN` | — | GitHub PAT for reading diffs and posting comments |
+| `LLM_PROVIDER` | `openai` | LLM provider: `openai` or `anthropic` |
+| `LLM_MODEL` | `gpt-4o-mini` | Model to use for the selected provider |
+| `LLM_MAX_TOKENS` | `2048` | Max tokens per LLM response |
+| `OPENAI_API_KEY` | — | Required when `LLM_PROVIDER=openai` |
+| `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
+| `LOG_LEVEL` | `INFO` | Python logging level |
 
 ## Endpoints
 
@@ -98,6 +111,12 @@ Add `-- prism: ignore` to any SQL line to suppress analysis for that query:
 ```sql
 SELECT * FROM users -- prism: ignore
 ```
+
+## Adding a new reviewer
+
+1. Extend `BaseReviewer` from `reviewers/base_reviewer.py`
+2. Implement the `review()` method returning a `ReviewResult`
+3. Register the reviewer in `core/analyser.py`
 
 ## Output format
 

@@ -88,6 +88,9 @@ def _consolidate(
 def _make_query(lines: list[str], start_line: int, file: str) -> ExtractedQuery:
     raw = "\n".join(lines).strip()
     suppressed = bool(_SUPPRESS_MARKER.search(raw))
-    # Strip suppression comment from the query itself
     clean = re.sub(r"--\s*prism:\s*ignore.*$", "", raw, flags=re.IGNORECASE | re.MULTILINE).strip()
+    # If SQL is embedded in a quoted string (e.g. Go/Python variable assignment), extract it
+    match = _QUERY_EXTRACTION.search(clean)
+    if match:
+        clean = match.group(1).strip()
     return ExtractedQuery(raw=clean, file=file, line=start_line, suppressed=suppressed)

@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 cp .env.example .env
-# Fill in GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN, ANTHROPIC_API_KEY
+# Fill in GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN, LLM_PROVIDER and the corresponding API key
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -37,11 +37,11 @@ mypy .
 
 ```
 POST /webhook/github
-  → github/webhook.py         # HMAC-SHA256 validation, filter PR events
+  → gh/webhook.py             # HMAC-SHA256 validation, filter PR events
   → core/analyser.py          # Orchestrates: fetch diff, extract queries, run reviewers
   → core/diff_parser.py       # Extracts SQL from unified git diff
   → reviewers/db_query/       # Static rules + LLM review per extracted query
-  → github/commenter.py       # Posts inline comments + summary to PR
+  → gh/commenter.py           # Posts inline comments + summary to PR
 ```
 
 ### Key Layers
@@ -52,13 +52,13 @@ POST /webhook/github
 | Config | `config/settings.py` | pydantic-settings loading from `.env` |
 | Orchestration | `core/analyser.py` | Coordinates diff parsing and reviewer dispatch |
 | Diff parsing | `core/diff_parser.py` | Extracts SQL queries + line numbers from diffs |
-| LLM wrapper | `core/llm_client.py` | Anthropic SDK calls with JSON output enforcement |
+| LLM wrapper | `core/llm_client.py` | Multi-provider LLM client (OpenAI / Anthropic) with JSON output enforcement |
 | Reviewer base | `reviewers/base_reviewer.py` | Abstract class all reviewers must implement |
 | DB query review | `reviewers/db_query/reviewer.py` | Runs static rules then LLM; returns `ReviewResult` |
 | Static rules | `reviewers/db_query/rules.py` | 6 SQL anti-pattern detectors (using sqlglot AST) |
 | LLM prompts | `reviewers/db_query/prompts.py` | System and user prompt templates |
 | Data models | `models/review.py` | Pydantic schemas for all reviewer output |
-| GitHub API | `github/commenter.py` | PyGithub integration for inline + summary comments |
+| GitHub API | `gh/commenter.py` | PyGithub integration for inline + summary comments |
 
 ### Adding a New Reviewer
 

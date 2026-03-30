@@ -105,19 +105,19 @@ async def github_webhook(
 
 
 def _fetch_pr_diff(owner: str, repo_name: str, pr_number: int) -> str:
-    """Fetch the unified diff for a PR using PyGithub."""
+    """Fetch the unified diff for a PR via the GitHub REST API."""
     try:
-        from github import Github
-        gh = Github(settings.github_token)
-        repo = gh.get_repo(f"{owner}/{repo_name}")
-        pr = repo.get_pull(pr_number)
-        # PyGithub doesn't expose raw diff directly — use the requester
-        headers, data = repo._requester.requestBlobAndCheck(  # type: ignore[attr-defined]
-            "GET",
-            pr.url,
-            headers={"Accept": "application/vnd.github.v3.diff"},
+        import requests
+        response = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}",
+            headers={
+                "Authorization": f"token {settings.github_token}",
+                "Accept": "application/vnd.github.v3.diff",
+            },
+            timeout=30,
         )
-        return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+        response.raise_for_status()
+        return response.text
     except Exception as exc:
         logger.error("Failed to fetch PR diff: %s", exc)
         return ""
