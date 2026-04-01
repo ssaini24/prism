@@ -45,14 +45,28 @@ class ORMReviewer(BaseReviewer):
             logger.info("ORM translation yielded no SQL for %s:%d", query.file, query.line)
             return ReviewResult(explanation=f"Could not translate {orm} code to SQL.")
 
-        # Step 2: run static rules + LLM on each translated query
+        # Step 2: run static rules + EXPLAIN + LLM on each translated query
+        from config import settings
+        from core.db_explainer import explain
+
         all_issues: list[Issue] = []
         for sql in sql_queries:
             static_issues = rules.run_all_rules(sql)
             all_issues.extend(static_issues)
+
+            explain_result = None
+            if settings.enable_db_explain:
+                exp = explain(sql)
+                if exp and exp.has_issues():
+                    explain_result = exp.to_dict()
+                    logger.info("ORM EXPLAIN: %s", exp.summary())
+
             try:
-                translated_query = ExtractedQuery(raw=sql, file=query.file, line=query.line)
-                user_prompt = sql_prompts.build_user_prompt(sql, schema_context, [i.model_dump() for i in static_issues])
+                user_prompt = sql_prompts.build_user_prompt(
+                    sql, schema_context,
+                    [i.model_dump() for i in static_issues],
+                    explain_result,
+                )
                 raw_response = self._llm.complete_json(
                     system=sql_prompts.SYSTEM_PROMPT,
                     user=user_prompt,

@@ -30,7 +30,7 @@ class PRCommenter:
         commit_sha: str,
     ) -> None:
         """
-        Post a consolidated review with inline comments and a summary body.
+        Post inline comments per issue and a summary comment on the PR.
 
         Args:
             owner: Repository owner (user or org).
@@ -41,6 +41,7 @@ class PRCommenter:
         """
         repo = self._gh.get_repo(f"{owner}/{repo_name}")
         pr: PullRequest = repo.get_pull(pr_number)
+        commit = repo.get_commit(commit_sha)
 
         total_issues = sum(len(r.issues) for _, r in results)
         if total_issues == 0:
@@ -48,44 +49,34 @@ class PRCommenter:
             pr.create_issue_comment(_clean_comment())
             return
 
-        # Build inline comments per file/line where possible
-        review_comments = []
+        # Post each issue as an individual inline comment.
+        # Posting individually means one bad line number won't block all others.
+        inline_count = 0
         for query, result in results:
-            if result.suppressed and not result.issues:
+            if not result.issues or query.line <= 0:
                 continue
             for issue in result.issues:
                 body = _format_inline_issue(issue, result)
-                if query.line > 0:
-                    try:
-                        review_comments.append(
-                            {
-                                "path": query.file,
-                                "line": query.line,
-                                "body": body,
-                            }
-                        )
-                    except Exception:
-                        pass  # Fall through to summary
+                try:
+                    pr.create_review_comment(
+                        body=body,
+                        commit=commit,
+                        path=query.file,
+                        line=query.line,
+                        side="RIGHT",
+                    )
+                    inline_count += 1
+                    logger.info(
+                        "Inline comment posted: %s:%d [%s]",
+                        query.file, query.line, issue.type,
+                    )
+                except GithubException as exc:
+                    logger.warning(
+                        "Inline comment failed for %s:%d [%s] (status=%s): %s",
+                        query.file, query.line, issue.type, exc.status, exc.data,
+                    )
 
-        summary_body = _build_summary(results)
-
-        try:
-            if review_comments:
-                pr.create_review(
-                    commit=repo.get_commit(commit_sha),
-                    body=summary_body,
-                    event="COMMENT",
-                    comments=review_comments,
-                )
-            else:
-                pr.create_issue_comment(summary_body)
-        except GithubException as exc:
-            logger.error("Failed to post review: %s", exc)
-            # Fallback: post as a plain issue comment
-            try:
-                pr.create_issue_comment(summary_body)
-            except GithubException:
-                logger.exception("Fallback comment also failed.")
+        logger.info("Posted %d inline comment(s).", inline_count)
 
 
 # ---------------------------------------------------------------------------
@@ -111,51 +102,6 @@ def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
         ]
     return "\n".join(lines)
 
-
-def _build_summary(results: list[tuple[ExtractedQuery, ReviewResult]]) -> str:
-    all_issues = [(q, i) for q, r in results for i in r.issues]
-    high = [i for _, i in all_issues if i.severity == "high"]
-    medium = [i for _, i in all_issues if i.severity == "medium"]
-    low = [i for _, i in all_issues if i.severity == "low"]
-
-    lines = [
-        "## 🔍 Prism Code Review",
-        "",
-        f"Found **{len(all_issues)} issue(s)**: "
-        f"🔴 {len(high)} high · 🟠 {len(medium)} medium · 🟡 {len(low)} low",
-        "",
-    ]
-
-    for query, result in results:
-        if not result.issues:
-            continue
-        lines.append(f"### `{query.file}` (line {query.line})")
-        lines.append(f"```sql\n{query.raw[:500]}\n```")
-        for issue in result.issues:
-            emoji = _SEVERITY_EMOJI.get(issue.severity, "⚪")
-            lines.append(f"- {emoji} **{issue.type}**: {issue.description}")
-            lines.append(f"  > {issue.suggestion}")
-        if result.index_suggestions:
-            lines.append("")
-            lines.append("**Index suggestions:**")
-            for s in result.index_suggestions:
-                lines.append(f"```sql\n{s}\n```")
-        if result.migration_warnings:
-            lines.append("")
-            lines.append("**Migration warnings:**")
-            for w in result.migration_warnings:
-                lines.append(f"- ⚠️ {w}")
-        if result.explanation:
-            lines.append("")
-            lines.append(f"_{result.explanation}_")
-        lines.append("")
-
-    lines += [
-        "---",
-        "_Review generated by [Prism](https://github.com/ssaini24/prism). "
-        "Suppress a block with `-- prism: ignore`._",
-    ]
-    return "\n".join(lines)
 
 
 def _clean_comment() -> str:

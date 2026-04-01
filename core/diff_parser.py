@@ -6,6 +6,12 @@ import re
 
 from models.review import ExtractedQuery
 
+# PHP function/method boundary — used to split PHP files into per-method blocks
+_PHP_FUNCTION = re.compile(
+    r"^\s*(public|protected|private|static|\s)*function\s+\w+\s*\(",
+    re.IGNORECASE,
+)
+
 # Patterns that suggest a line contains SQL
 _SQL_KEYWORDS = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|REPLACE|MERGE|WITH)\b",
@@ -56,7 +62,7 @@ def parse_diff(diff_text: str) -> list[ExtractedQuery]:
         if raw_line.startswith("+") and not raw_line.startswith("+++"):
             current_line += 1
             line_content = raw_line[1:]  # strip leading +
-            if _SQL_KEYWORDS.search(line_content):
+            if _SQL_KEYWORDS.search(line_content) and not _is_comment(line_content):
                 pending_lines.append((line_content, current_line, current_file))
         elif not raw_line.startswith("-"):
             # Context line — still advances new-file line counter
@@ -103,19 +109,35 @@ def _make_query(lines: list[str], start_line: int, file: str) -> ExtractedQuery:
     return ExtractedQuery(raw=clean, file=file, line=start_line, suppressed=suppressed)
 
 
+def _is_comment(line: str) -> bool:
+    """Return True if the line is a code comment (SQL, PHP, Python, Go, JS etc.)."""
+    stripped = line.strip()
+    return (
+        stripped.startswith("--")    # SQL comment
+        or stripped.startswith("#")  # Python / Ruby / shell
+        or stripped.startswith("//") # PHP, Go, JS, Java
+        or stripped.startswith("*")  # block comment body /* ... */
+        or stripped.startswith("/*") # block comment start
+    )
+
+
 def parse_code_blocks(diff_text: str) -> list[ExtractedQuery]:
     """
-    Extract all added lines from code files in the diff, grouped by hunk.
+    Extract added lines from code files in the diff.
 
-    Used by the Code Review Agent — passes full code context to the LLM
-    rather than SQL-keyword-filtered lines.
+    For PHP files, splits at function/method boundaries so each method
+    becomes its own block with its correct starting line number.
+    For all other code files, groups by diff hunk.
+
+    Used by the Code Review Agent and ORM Reviewer.
     """
     blocks: list[ExtractedQuery] = []
     current_file = "unknown"
     current_line = 0
+    is_php = False
     hunk_lines: list[tuple[str, int]] = []
 
-    def flush_hunk() -> None:
+    def flush_block() -> None:
         if hunk_lines:
             raw = "\n".join(line for line, _ in hunk_lines).strip()
             if raw:
@@ -127,12 +149,13 @@ def parse_code_blocks(diff_text: str) -> list[ExtractedQuery]:
 
     for raw_line in diff_text.splitlines():
         if raw_line.startswith("+++ b/"):
-            flush_hunk()
+            flush_block()
             hunk_lines = []
             current_file = raw_line[6:].strip()
             current_line = 0
-            # Only process code files
-            if os.path.splitext(current_file)[1].lower() not in _CODE_EXTENSIONS:
+            ext = os.path.splitext(current_file)[1].lower()
+            is_php = ext == ".php"
+            if ext not in _CODE_EXTENSIONS:
                 current_file = "__skip__"
             continue
 
@@ -140,7 +163,7 @@ def parse_code_blocks(diff_text: str) -> list[ExtractedQuery]:
             continue
 
         if raw_line.startswith("@@"):
-            flush_hunk()
+            flush_block()
             hunk_lines = []
             match = re.search(r"\+(\d+)", raw_line)
             if match:
@@ -149,9 +172,14 @@ def parse_code_blocks(diff_text: str) -> list[ExtractedQuery]:
 
         if raw_line.startswith("+") and not raw_line.startswith("+++"):
             current_line += 1
-            hunk_lines.append((raw_line[1:], current_line))
+            line_content = raw_line[1:]
+            # PHP: start a new block at each method/function definition
+            if is_php and _PHP_FUNCTION.match(line_content) and hunk_lines:
+                flush_block()
+                hunk_lines = []
+            hunk_lines.append((line_content, current_line))
         elif not raw_line.startswith("-"):
             current_line += 1
 
-    flush_hunk()
+    flush_block()
     return blocks

@@ -25,7 +25,7 @@ def run_all_rules(query: str, indexed_columns: set[str] | None = None) -> list[I
     issues: list[Issue] = []
 
     try:
-        statements = sqlglot.parse(query, error_level=sqlglot.ErrorLevel.WARN)
+        statements = sqlglot.parse(query, dialect="mysql", error_level=sqlglot.ErrorLevel.WARN)
     except Exception:
         # Unparseable — skip static rules, let LLM handle it
         return issues

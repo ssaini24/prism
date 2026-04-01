@@ -12,7 +12,10 @@ logger = logging.getLogger(__name__)
 
 # SQL file extensions and patterns we care about
 _SQL_EXTENSIONS = {".sql", ".pgsql", ".mysql"}
-_CODE_EXTENSIONS = {".py", ".php", ".rb", ".js", ".ts", ".java", ".go", ".cs"}
+_CODE_EXTENSIONS = {".py", ".rb", ".js", ".ts", ".java", ".go", ".cs"}
+
+# Extensions owned by ORM reviewer — DB reviewer must not process these
+_ORM_EXTENSIONS = {".php"}
 
 
 class DBQueryReviewer(BaseReviewer):
@@ -28,13 +31,21 @@ class DBQueryReviewer(BaseReviewer):
     def can_review(self, query: ExtractedQuery) -> bool:
         if query.suppressed:
             return False
-        # Accept SQL files and common code files that embed queries
         import os
         ext = os.path.splitext(query.file)[1].lower()
+        # PHP files are owned by the ORM reviewer
+        if ext in _ORM_EXTENSIONS:
+            return False
         return ext in _SQL_EXTENSIONS | _CODE_EXTENSIONS or ext == ""
 
     def review(self, query: ExtractedQuery, schema_context: str = "") -> ReviewResult:
+        short = query.raw.strip()[:100].replace("\n", " ")
+        logger.info("─" * 60)
+        logger.info("[SQL Review] %s:%d", query.file, query.line)
+        logger.info("[SQL Review] Query: %s...", short)
+
         if query.suppressed:
+            logger.info("[SQL Review] Suppressed via prism:ignore — skipping.")
             return ReviewResult(
                 suppressed=[query.raw],
                 explanation="Query suppressed via -- prism: ignore comment.",
@@ -42,20 +53,21 @@ class DBQueryReviewer(BaseReviewer):
 
         # 1. Run static rules
         static_issues = rules.run_all_rules(query.raw)
-        logger.debug(
-            "Static rules found %d issue(s) for query at %s:%d",
-            len(static_issues),
-            query.file,
-            query.line,
-        )
+        if static_issues:
+            types = ", ".join(f"{i.type} ({i.severity})" for i in static_issues)
+            logger.info("[Static Rules] %d issue(s): %s", len(static_issues), types)
+        else:
+            logger.info("[Static Rules] No issues found.")
 
         # 2. Call LLM for optimisation suggestions
         try:
             result = self._llm_review(query.raw, schema_context, static_issues)
         except Exception as exc:
-            logger.warning("LLM review failed, falling back to static-only: %s", exc)
+            logger.warning("[LLM Review] Failed, using static-only results: %s", exc)
             result = _build_static_only_result(static_issues)
 
+        total = len(result.issues)
+        logger.info("[SQL Review] ✓ Complete — %d total issue(s)", total)
         return result
 
     # ------------------------------------------------------------------
@@ -68,15 +80,36 @@ class DBQueryReviewer(BaseReviewer):
         schema_context: str,
         static_issues: list[Issue],
     ) -> ReviewResult:
+        from config import settings
+        from core.db_explainer import explain
+
+        explain_result = None
+        if settings.enable_db_explain:
+            result = explain(query)
+            if result and result.has_issues():
+                explain_result = result.to_dict()
+            elif result:
+                logger.info("[EXPLAIN] No performance issues detected.")
+
+        logger.info("[LLM Review] ▶ Sending query to LLM for analysis...")
         static_dicts = [i.model_dump() for i in static_issues]
-        user_prompt = prompts.build_user_prompt(query, schema_context, static_dicts)
+        user_prompt = prompts.build_user_prompt(
+            query, schema_context, static_dicts, explain_result
+        )
 
         raw = self._llm.complete_json(
             system=prompts.SYSTEM_PROMPT,
             user=user_prompt,
         )
 
-        return _parse_llm_response(raw, static_issues)
+        result = _parse_llm_response(raw, static_issues)
+        llm_only = [i for i in result.issues if i not in static_issues]
+        logger.info("[LLM Review] ✓ Done — %d new issue(s) from LLM", len(llm_only))
+        if result.optimized_query:
+            logger.info("[LLM Review] Optimized query provided.")
+        if result.index_suggestions:
+            logger.info("[LLM Review] Index suggestions: %s", result.index_suggestions)
+        return result
 
 
 # ---------------------------------------------------------------------------
