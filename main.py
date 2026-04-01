@@ -77,6 +77,8 @@ async def github_webhook(
     owner, repo_name, pr_number = pr_info
     commit_sha = payload.get("pull_request", {}).get("head", {}).get("sha", "")
 
+    from core.llm_client import log_usage_summary, reset_usage_tracker
+    reset_usage_tracker()
     logger.info("Processing PR #%d for %s/%s", pr_number, owner, repo_name)
 
     # Fetch the diff from GitHub
@@ -97,6 +99,7 @@ async def github_webhook(
     low    = sum(1 for i in all_issues if i.severity == "low")
     files  = sorted({q.file for q, r in results if r.issues})
 
+    log_usage_summary()
     logger.info("═" * 60)
     logger.info("  PR #%d REVIEW COMPLETE — %s/%s", pr_number, owner, repo_name)
     logger.info("  Issues : %d total (🔴 %d high · 🟠 %d medium · 🟡 %d low)",

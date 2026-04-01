@@ -224,9 +224,8 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
     """
     Flag ALTER TABLE statements that omit ALGORITHM or LOCK options.
 
-    Without these options MySQL/MariaDB may acquire a full MDL (metadata lock)
-    for the duration of the operation, blocking all reads and writes on the table.
-    This has caused multiple P0/P1 incidents in production.
+    Enriches the warning with the actual row count from MySQL so engineers
+    can see estimated lock time before merging.
     """
     issues = []
     if not isinstance(stmt, exp.Alter):
@@ -244,6 +243,20 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
         if not has_lock:
             missing.append("LOCK=NONE")
 
+        # Extract table name for row count lookup
+        table_name = stmt.this.name if stmt.this and hasattr(stmt.this, "name") else None
+        row_info = _fetch_table_row_info(table_name) if table_name else None
+
+        if row_info:
+            rows, lock_estimate = row_info
+            rows_fmt = f"{rows:,}"
+            lock_line = (
+                f" Table `{table_name}` currently has **{rows_fmt} rows** — "
+                f"estimated lock time: **~{lock_estimate}**."
+            )
+        else:
+            lock_line = ""
+
         issues.append(
             Issue(
                 type="unsafe_alter_table",
@@ -253,7 +266,7 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
                 description=(
                     f"ALTER TABLE is missing {' and '.join(missing)}. "
                     "Without these options MySQL may acquire a full metadata lock (MDL), "
-                    "blocking all reads and writes on the table for the duration of the migration."
+                    f"blocking all reads and writes for the duration of the migration.{lock_line}"
                 ),
                 suggestion=(
                     "Add ALGORITHM=INPLACE, LOCK=NONE to allow online DDL with minimal locking. "
@@ -263,3 +276,52 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
             )
         )
     return issues
+
+
+def _fetch_table_row_info(table_name: str) -> tuple[int, str] | None:
+    """
+    Return (row_count, human_readable_lock_estimate) for a table.
+
+    Lock time heuristic (MySQL offline ALTER, worst case):
+      < 10k rows   → seconds
+      < 1M rows    → tens of seconds to minutes
+      >= 1M rows   → minutes to hours
+    """
+    try:
+        import pymysql
+        from config import settings
+
+        conn = pymysql.connect(
+            host=settings.db_host, port=settings.db_port,
+            user=settings.db_user, password=settings.db_password,
+            database=settings.db_name,
+            connect_timeout=3, read_timeout=5,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT TABLE_ROWS FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                    (table_name,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                rows = int(row["TABLE_ROWS"] or 0)
+
+        if rows < 10_000:
+            estimate = "< 5 seconds"
+        elif rows < 100_000:
+            estimate = "~10–30 seconds"
+        elif rows < 1_000_000:
+            estimate = "~1–5 minutes"
+        elif rows < 10_000_000:
+            estimate = "~10–30 minutes"
+        else:
+            estimate = "potentially hours — plan a maintenance window"
+
+        return rows, estimate
+
+    except Exception:
+        return None

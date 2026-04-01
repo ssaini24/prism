@@ -103,15 +103,33 @@ _COST_PER_1K: dict[str, tuple[float, float]] = {
     "gpt-4o":                     (0.0025,  0.01),
 }
 
+# Accumulates token usage across all LLM calls within a single PR review.
+# Reset at the start of each PR via reset_usage_tracker().
+_usage: dict = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0, "estimated": False}
+
+
+def reset_usage_tracker() -> None:
+    _usage.update(calls=0, input_tokens=0, output_tokens=0, cost=0.0, estimated=False)
+
+
+def log_usage_summary() -> None:
+    label = "~" if _usage["estimated"] else ""
+    logger.info(
+        "LLM total — calls: %d | in: %d tokens | out: %d tokens | cost: %s$%.6f%s",
+        _usage["calls"], _usage["input_tokens"], _usage["output_tokens"],
+        label, _usage["cost"], " (estimated)" if _usage["estimated"] else "",
+    )
+
 
 def _log_usage(model: str, input_tokens: int, output_tokens: int, estimated: bool = False) -> None:
     cost_in, cost_out = _COST_PER_1K.get(model, (0.0, 0.0))
-    total_cost = (input_tokens / 1000 * cost_in) + (output_tokens / 1000 * cost_out)
-    label = "~" if estimated else ""
-    logger.info(
-        "LLM usage — model: %s | in: %d tokens | out: %d tokens | cost: %s$%.6f%s",
-        model, input_tokens, output_tokens, label, total_cost, " (estimated)" if estimated else "",
-    )
+    cost = (input_tokens / 1000 * cost_in) + (output_tokens / 1000 * cost_out)
+    _usage["calls"] += 1
+    _usage["input_tokens"] += input_tokens
+    _usage["output_tokens"] += output_tokens
+    _usage["cost"] += cost
+    if estimated:
+        _usage["estimated"] = True
 
 
 # ---------------------------------------------------------------------------
