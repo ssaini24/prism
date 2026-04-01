@@ -45,6 +45,7 @@ class Analyser:
         self,
         diff_text: str,
         schema_context: str = "",
+        repo: str = "",
     ) -> list[tuple[ExtractedQuery, ReviewResult]]:
         """
         Run all reviewers over the PR diff.
@@ -63,6 +64,11 @@ class Analyser:
             len(sql_blocks),
             len(code_blocks),
         )
+
+        # Propagate repo to reviewers that support feedback adjustment
+        for reviewer in self._sql_reviewers + self._orm_reviewers:
+            if hasattr(reviewer, "set_repo"):
+                reviewer.set_repo(repo)
 
         results: list[tuple[ExtractedQuery, ReviewResult]] = []
         results.extend(self._run(sql_blocks, self._sql_reviewers, schema_context))

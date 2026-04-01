@@ -43,6 +43,41 @@ def _compute_signature(body: bytes, secret: str) -> str:
     return f"sha256={mac.hexdigest()}"
 
 
+def extract_review_comment_feedback(payload: dict) -> dict | None:
+    """
+    Extract feedback info from a pull_request_review_comment webhook payload.
+
+    Only processes reply comments (in_reply_to_id is set) with action=created.
+    Returns None if this isn't a reply to track.
+
+    Returns:
+        {
+          "repo":            "owner/repo",
+          "in_reply_to_id":  int,           # ID of the parent comment (Prism's comment)
+          "reply_body":      str,
+          "file_ext":        str,           # e.g. ".php"
+        }
+    """
+    if payload.get("action") != "created":
+        return None
+
+    comment = payload.get("comment", {})
+    in_reply_to_id = comment.get("in_reply_to_id")
+    if not in_reply_to_id:
+        return None  # top-level comment, not a reply
+
+    repo = payload.get("repository", {}).get("full_name", "")
+    body = comment.get("body", "")
+    path = comment.get("path", "")
+
+    return {
+        "repo": repo,
+        "in_reply_to_id": in_reply_to_id,
+        "reply_body": body,
+        "file_path": path,   # full path e.g. "database/migrations/2024_01_create_users.php"
+    }
+
+
 def extract_pr_info(payload: dict) -> tuple[str, str, int] | None:
     """
     Extract (owner, repo, pr_number) from a GitHub pull_request webhook payload.

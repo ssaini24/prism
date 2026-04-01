@@ -23,6 +23,7 @@ class DBQueryReviewer(BaseReviewer):
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
         self._llm = llm_client or create_llm_client()
+        self._repo = ""
 
     @property
     def name(self) -> str:
@@ -37,6 +38,9 @@ class DBQueryReviewer(BaseReviewer):
         if ext in _ORM_EXTENSIONS:
             return False
         return ext in _SQL_EXTENSIONS | _CODE_EXTENSIONS or ext == ""
+
+    def set_repo(self, repo: str) -> None:
+        self._repo = repo
 
     def review(self, query: ExtractedQuery, schema_context: str = "") -> ReviewResult:
         short = query.raw.strip()[:100].replace("\n", " ")
@@ -66,8 +70,8 @@ class DBQueryReviewer(BaseReviewer):
             logger.warning("[LLM Review] Failed, using static-only results: %s", exc)
             result = _build_static_only_result(static_issues)
 
-        total = len(result.issues)
-        logger.info("[SQL Review] ✓ Complete — %d total issue(s)", total)
+        result = _apply_feedback(result, query.file, self._repo)
+        logger.info("[SQL Review] ✓ Complete — %d total issue(s)", len(result.issues))
         return result
 
     # ------------------------------------------------------------------
@@ -115,6 +119,51 @@ class DBQueryReviewer(BaseReviewer):
 # ---------------------------------------------------------------------------
 # Response parsing helpers
 # ---------------------------------------------------------------------------
+
+
+_SEVERITY_ORDER = ["low", "medium", "high"]
+
+
+def _apply_feedback(result: ReviewResult, file_path: str, repo: str) -> ReviewResult:
+    """Adjust issue severity and add team feedback labels based on stored signals."""
+    from core.feedback_store import get_adjustment
+
+    adjusted = []
+    for issue in result.issues:
+        adj = get_adjustment(issue.type, repo, file_path)
+
+        if adj.get("skip"):
+            logger.info(
+                "[Feedback] Rule [%s] SKIPPED — team marked as false positive %d time(s) in %s",
+                issue.type, abs(adj["net_signal"]), file_path,
+            )
+            continue
+
+        if adj["net_signal"] == 0 and not adj["label"]:
+            adjusted.append(issue)
+            continue
+
+        new_severity = issue.severity
+        if adj["severity_delta"] < 0:
+            idx = _SEVERITY_ORDER.index(issue.severity) if issue.severity in _SEVERITY_ORDER else 1
+            new_severity = _SEVERITY_ORDER[max(0, idx - 1)]
+
+        new_description = issue.description
+        if adj["label"]:
+            new_description = f"{issue.description}\n\n{adj['label']}"
+
+        adjusted.append(issue.model_copy(update={
+            "severity": new_severity,
+            "description": new_description,
+        }))
+
+        if adj["net_signal"] != 0 or adj["source"] == "builtin":
+            logger.info(
+                "[Feedback] Rule [%s] adjusted: severity %s→%s (source=%s, net=%d)",
+                issue.type, issue.severity, new_severity, adj["source"], adj["net_signal"],
+            )
+
+    return result.model_copy(update={"issues": adjusted})
 
 
 def _parse_llm_response(data: dict, static_issues: list[Issue]) -> ReviewResult:
