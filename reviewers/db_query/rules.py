@@ -39,6 +39,7 @@ def run_all_rules(query: str, indexed_columns: set[str] | None = None) -> list[I
         issues.extend(_check_inefficient_joins(stmt))
         issues.extend(_check_n_plus_one_heuristic(stmt))
         issues.extend(_check_migration_risks(stmt))
+        issues.extend(_check_unsafe_alter(stmt))
 
     return issues
 
@@ -214,6 +215,51 @@ def _check_migration_risks(stmt: exp.Expression) -> list[Issue]:
                 line=0,
                 description="TRUNCATE removes all rows without logging individual row deletions — it cannot be rolled back in some databases.",
                 suggestion="Prefer DELETE with a WHERE clause if partial deletion is intended, or ensure this truncation is intentional.",
+            )
+        )
+    return issues
+
+
+def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
+    """
+    Flag ALTER TABLE statements that omit ALGORITHM or LOCK options.
+
+    Without these options MySQL/MariaDB may acquire a full MDL (metadata lock)
+    for the duration of the operation, blocking all reads and writes on the table.
+    This has caused multiple P0/P1 incidents in production.
+    """
+    issues = []
+    if not isinstance(stmt, exp.AlterTable):
+        return issues
+
+    raw = stmt.sql(dialect="mysql").upper()
+
+    has_algorithm = "ALGORITHM=" in raw
+    has_lock = "LOCK=" in raw
+
+    if not has_algorithm or not has_lock:
+        missing = []
+        if not has_algorithm:
+            missing.append("ALGORITHM=INPLACE (or INSTANT)")
+        if not has_lock:
+            missing.append("LOCK=NONE")
+
+        issues.append(
+            Issue(
+                type="unsafe_alter_table",
+                severity="high",
+                confidence="high",
+                line=0,
+                description=(
+                    f"ALTER TABLE is missing {' and '.join(missing)}. "
+                    "Without these options MySQL may acquire a full metadata lock (MDL), "
+                    "blocking all reads and writes on the table for the duration of the migration."
+                ),
+                suggestion=(
+                    "Add ALGORITHM=INPLACE, LOCK=NONE to allow online DDL with minimal locking. "
+                    "Use ALGORITHM=INSTANT for supported operations (MySQL 8.0+). "
+                    "If the operation does not support INPLACE, schedule during a maintenance window."
+                ),
             )
         )
     return issues

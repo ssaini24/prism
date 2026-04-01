@@ -1,6 +1,7 @@
-"""Extracts SQL queries from GitHub PR git diffs."""
+"""Extracts SQL queries and code blocks from GitHub PR git diffs."""
 from __future__ import annotations
 
+import os
 import re
 
 from models.review import ExtractedQuery
@@ -19,6 +20,12 @@ _QUERY_EXTRACTION = re.compile(
     r"""(?:["'`]|r["'])((?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|REPLACE|MERGE|WITH)[\s\S]+?)(?:["'`])""",
     re.IGNORECASE,
 )
+
+# Code file extensions for the code review agent
+_CODE_EXTENSIONS = {
+    ".go", ".py", ".php", ".rb", ".js", ".ts",
+    ".java", ".cs", ".rs", ".cpp", ".c", ".kt", ".swift",
+}
 
 
 def parse_diff(diff_text: str) -> list[ExtractedQuery]:
@@ -94,3 +101,57 @@ def _make_query(lines: list[str], start_line: int, file: str) -> ExtractedQuery:
     if match:
         clean = match.group(1).strip()
     return ExtractedQuery(raw=clean, file=file, line=start_line, suppressed=suppressed)
+
+
+def parse_code_blocks(diff_text: str) -> list[ExtractedQuery]:
+    """
+    Extract all added lines from code files in the diff, grouped by hunk.
+
+    Used by the Code Review Agent — passes full code context to the LLM
+    rather than SQL-keyword-filtered lines.
+    """
+    blocks: list[ExtractedQuery] = []
+    current_file = "unknown"
+    current_line = 0
+    hunk_lines: list[tuple[str, int]] = []
+
+    def flush_hunk() -> None:
+        if hunk_lines:
+            raw = "\n".join(line for line, _ in hunk_lines).strip()
+            if raw:
+                blocks.append(ExtractedQuery(
+                    raw=raw,
+                    file=current_file,
+                    line=hunk_lines[0][1],
+                ))
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("+++ b/"):
+            flush_hunk()
+            hunk_lines = []
+            current_file = raw_line[6:].strip()
+            current_line = 0
+            # Only process code files
+            if os.path.splitext(current_file)[1].lower() not in _CODE_EXTENSIONS:
+                current_file = "__skip__"
+            continue
+
+        if current_file == "__skip__":
+            continue
+
+        if raw_line.startswith("@@"):
+            flush_hunk()
+            hunk_lines = []
+            match = re.search(r"\+(\d+)", raw_line)
+            if match:
+                current_line = int(match.group(1)) - 1
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            current_line += 1
+            hunk_lines.append((raw_line[1:], current_line))
+        elif not raw_line.startswith("-"):
+            current_line += 1
+
+    flush_hunk()
+    return blocks

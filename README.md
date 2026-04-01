@@ -62,6 +62,7 @@ prism/
 | `JOIN` without `ON` condition (cartesian product) | high |
 | Correlated subqueries — N+1 heuristic | high |
 | Destructive DDL (`DROP`, `TRUNCATE`) | high |
+| `ALTER TABLE` without `ALGORITHM` / `LOCK` options (MDL lock risk) | high |
 
 ## Tech stack
 
