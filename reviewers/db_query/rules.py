@@ -229,7 +229,7 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
     This has caused multiple P0/P1 incidents in production.
     """
     issues = []
-    if not isinstance(stmt, exp.AlterTable):
+    if not isinstance(stmt, exp.Alter):
         return issues
 
     raw = stmt.sql(dialect="mysql").upper()

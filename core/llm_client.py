@@ -58,6 +58,7 @@ class AnthropicClient(LLMClient):
             system=system,
             messages=[{"role": "user", "content": user}],
         )
+        _log_usage(self._model, message.usage.input_tokens, message.usage.output_tokens)
         return message.content[0].text
 
 
@@ -84,16 +85,76 @@ class OpenAIClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         )
+        usage = response.usage
+        if usage:
+            _log_usage(self._model, usage.prompt_tokens, usage.completion_tokens)
         return response.choices[0].message.content or ""
+
+
+# ---------------------------------------------------------------------------
+# Usage logging
+# ---------------------------------------------------------------------------
+
+# Approximate cost per 1K tokens (input / output) by model
+_COST_PER_1K: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5-20251001":  (0.00025, 0.00125),
+    "claude-sonnet-4-6":          (0.003,   0.015),
+    "gpt-4o-mini":                (0.00015, 0.0006),
+    "gpt-4o":                     (0.0025,  0.01),
+}
+
+
+def _log_usage(model: str, input_tokens: int, output_tokens: int, estimated: bool = False) -> None:
+    cost_in, cost_out = _COST_PER_1K.get(model, (0.0, 0.0))
+    total_cost = (input_tokens / 1000 * cost_in) + (output_tokens / 1000 * cost_out)
+    label = "~" if estimated else ""
+    logger.info(
+        "LLM usage — model: %s | in: %d tokens | out: %d tokens | cost: %s$%.6f%s",
+        model, input_tokens, output_tokens, label, total_cost, " (estimated)" if estimated else "",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Claude Code CLI provider (uses local `claude` binary — no API key needed)
+# ---------------------------------------------------------------------------
+
+
+class ClaudeCodeClient(LLMClient):
+    """
+    Calls the local Claude Code CLI via subprocess.
+
+    Uses your existing `claude` auth — no ANTHROPIC_API_KEY required.
+    Set LLM_PROVIDER=claude-code in .env to use this.
+    """
+
+    def complete(self, system: str, user: str) -> str:
+        import subprocess
+        prompt = f"{system}\n\n{user}"
+        # Estimate tokens: ~4 chars per token
+        est_input_tokens = len(prompt) // 4
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Claude Code CLI error: {result.stderr.strip()}")
+        output = result.stdout.strip()
+        est_output_tokens = len(output) // 4
+        # claude-code uses haiku-class model — estimate cost at haiku rates
+        _log_usage("claude-haiku-4-5-20251001", est_input_tokens, est_output_tokens, estimated=True)
+        return output
+
+
 _PROVIDERS: dict[str, type[LLMClient]] = {
     "anthropic": AnthropicClient,
     "openai": OpenAIClient,
+    "claude-code": ClaudeCodeClient,
 }
 
 

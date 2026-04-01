@@ -9,6 +9,7 @@ from models.review import ExtractedQuery, ReviewResult
 from reviewers.base_reviewer import BaseReviewer
 from reviewers.code_review.reviewer import CodeReviewAgent
 from reviewers.db_query.reviewer import DBQueryReviewer
+from reviewers.orm.reviewer import ORMReviewer
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +26,20 @@ class Analyser:
     """
 
     def __init__(self, reviewers: list[BaseReviewer] | None = None) -> None:
+        from config import settings
         llm = create_llm_client()
         self._sql_reviewers: list[BaseReviewer] = [DBQueryReviewer(llm_client=llm)]
-        self._code_reviewers: list[BaseReviewer] = [CodeReviewAgent(llm_client=llm)]
+        self._code_reviewers: list[BaseReviewer] = (
+            [CodeReviewAgent(llm_client=llm)] if settings.enable_code_review else []
+        )
+        self._orm_reviewers: list[BaseReviewer] = (
+            [ORMReviewer(llm_client=llm)] if settings.enable_orm_review else []
+        )
         if reviewers is not None:
             # Allow full override in tests
             self._sql_reviewers = reviewers
             self._code_reviewers = []
+            self._orm_reviewers = []
 
     def analyse_pr(
         self,
@@ -59,6 +67,7 @@ class Analyser:
         results: list[tuple[ExtractedQuery, ReviewResult]] = []
         results.extend(self._run(sql_blocks, self._sql_reviewers, schema_context))
         results.extend(self._run(code_blocks, self._code_reviewers, schema_context))
+        results.extend(self._run(code_blocks, self._orm_reviewers, schema_context))
         return results
 
     def _run(

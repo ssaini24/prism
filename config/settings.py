@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # Feature flags
+    enable_code_review: bool = False
+    enable_orm_review: bool = False
+
     # App
     log_level: str = "INFO"
     environment: str = "development"
