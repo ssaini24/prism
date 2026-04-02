@@ -174,6 +174,18 @@ def _comment_key(comment) -> tuple[str, int, str] | None:
     return (comment.path, pos, match.group(1))
 
 
+_INDEX_RELEVANT_TYPES = {
+    "full_table_scan", "missing_index", "function_on_indexed_column",
+    "inefficient_subquery", "n_plus_one_pattern",
+}
+
+_QUERY_PERF_TYPES = {
+    "full_table_scan", "missing_index", "select_star", "function_on_indexed_column",
+    "join_without_condition", "n_plus_one_pattern", "inefficient_subquery",
+    "implicit_type_conversion", "unbounded_result_set",
+}
+
+
 def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
     emoji = _SEVERITY_EMOJI.get(issue.severity, "⚪")
     confidence = _CONFIDENCE_LABEL.get(issue.confidence, issue.confidence)
@@ -184,13 +196,15 @@ def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
         "",
         f"**Suggestion:** {issue.suggestion}",
     ]
-    if result.optimized_query:
+    # Only show optimized query for performance-related issues
+    if result.optimized_query and issue.type in _QUERY_PERF_TYPES:
         lines += [
             "",
             "**Optimized query:**",
             f"```sql\n{result.optimized_query}\n```",
         ]
-    if result.index_suggestions:
+    # Only show index suggestions for issues where an index would actually help
+    if result.index_suggestions and issue.type in _INDEX_RELEVANT_TYPES:
         lines += ["", "**Index suggestions:**"]
         for s in result.index_suggestions:
             lines.append(f"```sql\n{s}\n```")

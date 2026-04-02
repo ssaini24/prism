@@ -41,7 +41,7 @@ Rules:
 - If no EXPLAIN data, set basis to "static" — never claim runtime data you do not have.
 - Only include issues you are confident about; prefer fewer high-confidence findings over many speculative ones.
 - optimized_query must be the full rewritten SQL or an empty string if no improvement is possible.
-- index_suggestions should be actionable CREATE INDEX statements or empty.
+- index_suggestions should be actionable CREATE INDEX statements, ONLY when the query has a full table scan or missing index. Leave empty for missing WHERE clause, destructive DDL, or other non-scan issues.
 - migration_warnings should flag destructive operations (DROP, TRUNCATE, column removals).
 - Keep explanation concise (2-4 sentences max).
 - The "type" field MUST be one of the following canonical values — never invent new ones:
