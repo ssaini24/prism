@@ -43,13 +43,7 @@ class DBQueryReviewer(BaseReviewer):
         self._repo = repo
 
     def review(self, query: ExtractedQuery, schema_context: str = "") -> ReviewResult:
-        short = query.raw.strip()[:100].replace("\n", " ")
-        logger.info("─" * 60)
-        logger.info("[SQL Review] %s:%d", query.file, query.line)
-        logger.info("[SQL Review] Query: %s...", short)
-
         if query.suppressed:
-            logger.info("[SQL Review] Suppressed via prism:ignore — skipping.")
             return ReviewResult(
                 suppressed=[query.raw],
                 explanation="Query suppressed via -- prism: ignore comment.",
@@ -57,11 +51,6 @@ class DBQueryReviewer(BaseReviewer):
 
         # 1. Run static rules
         static_issues = rules.run_all_rules(query.raw)
-        if static_issues:
-            types = ", ".join(f"{i.type} ({i.severity})" for i in static_issues)
-            logger.info("[Static Rules] %d issue(s): %s", len(static_issues), types)
-        else:
-            logger.info("[Static Rules] No issues found.")
 
         # 2. Call LLM for optimisation suggestions
         try:
@@ -70,9 +59,7 @@ class DBQueryReviewer(BaseReviewer):
             logger.warning("[LLM Review] Failed, using static-only results: %s", exc)
             result = _build_static_only_result(static_issues)
 
-        result = _apply_feedback(result, query.file, self._repo)
-        logger.info("[SQL Review] ✓ Complete — %d total issue(s)", len(result.issues))
-        return result
+        return _apply_feedback(result, query.file, self._repo)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -92,10 +79,7 @@ class DBQueryReviewer(BaseReviewer):
             result = explain(query)
             if result and result.has_issues():
                 explain_result = result.to_dict()
-            elif result:
-                logger.info("[EXPLAIN] No performance issues detected.")
 
-        logger.info("[LLM Review] ▶ Sending query to LLM for analysis...")
         static_dicts = [i.model_dump() for i in static_issues]
         user_prompt = prompts.build_user_prompt(
             query, schema_context, static_dicts, explain_result
@@ -106,14 +90,7 @@ class DBQueryReviewer(BaseReviewer):
             user=user_prompt,
         )
 
-        result = _parse_llm_response(raw, static_issues)
-        llm_only = [i for i in result.issues if i not in static_issues]
-        logger.info("[LLM Review] ✓ Done — %d new issue(s) from LLM", len(llm_only))
-        if result.optimized_query:
-            logger.info("[LLM Review] Optimized query provided.")
-        if result.index_suggestions:
-            logger.info("[LLM Review] Index suggestions: %s", result.index_suggestions)
-        return result
+        return _parse_llm_response(raw, static_issues)
 
 
 # ---------------------------------------------------------------------------
@@ -133,10 +110,6 @@ def _apply_feedback(result: ReviewResult, file_path: str, repo: str) -> ReviewRe
         adj = get_adjustment(issue.type, repo, file_path)
 
         if adj.get("skip"):
-            logger.info(
-                "[Feedback] Rule [%s] SKIPPED — team marked as false positive %d time(s) in %s",
-                issue.type, abs(adj["net_signal"]), file_path,
-            )
             continue
 
         if adj["net_signal"] == 0 and not adj["label"]:
@@ -157,11 +130,6 @@ def _apply_feedback(result: ReviewResult, file_path: str, repo: str) -> ReviewRe
             "description": new_description,
         }))
 
-        if adj["net_signal"] != 0 or adj["source"] == "builtin":
-            logger.info(
-                "[Feedback] Rule [%s] adjusted: severity %s→%s (source=%s, net=%d)",
-                issue.type, issue.severity, new_severity, adj["source"], adj["net_signal"],
-            )
 
     return result.model_copy(update={"issues": adjusted})
 

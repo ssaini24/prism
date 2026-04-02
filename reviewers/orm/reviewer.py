@@ -46,7 +46,6 @@ class ORMReviewer(BaseReviewer):
         # Step 1: translate ORM → raw SQL
         sql_queries = translate(orm, query.raw, self._llm)
         if not sql_queries:
-            logger.info("ORM translation yielded no SQL for %s:%d", query.file, query.line)
             return ReviewResult(explanation=f"Could not translate {orm} code to SQL.")
 
         # Step 2: run static rules + EXPLAIN + LLM on each translated query
@@ -63,7 +62,6 @@ class ORMReviewer(BaseReviewer):
                 exp = explain(sql)
                 if exp and exp.has_issues():
                     explain_result = exp.to_dict()
-                    logger.info("ORM EXPLAIN: %s", exp.summary())
 
             try:
                 user_prompt = sql_prompts.build_user_prompt(

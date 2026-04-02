@@ -133,7 +133,8 @@ async def _handle_review_comment(body: bytes) -> JSONResponse:
     """
     Process engineer replies to Prism inline comments.
 
-    Detects positive/negative signals and stores them in the feedback DB.
+    Negative signal → saved to feedback DB (suppresses future reviews).
+    Positive signal → reply only, not saved.
     """
     import json, re
     from core.feedback_store import detect_signal, record_feedback
@@ -178,21 +179,20 @@ async def _handle_review_comment(body: bytes) -> JSONResponse:
         logger.warning("Could not fetch parent comment %d: %s", info["in_reply_to_id"], exc)
         return JSONResponse({"message": "Could not resolve parent comment."}, status_code=200)
 
-    record_feedback(
-        rule=rule,
-        repo=info["repo"],
-        file_path=info["file_path"],
-        signal=signal,
-        comment=info["reply_body"],
-    )
+    # Negative signal → save to DB so future reviews are suppressed
+    # Positive signal → reply only, no DB write
+    if signal < 0:
+        record_feedback(
+            rule=rule,
+            repo=info["repo"],
+            file_path=info["file_path"],
+            signal=signal,
+            comment=info["reply_body"],
+        )
+        logger.info("Feedback saved: negative for rule [%s] in %s", rule, info["file_path"])
+    else:
+        logger.info("Positive signal for rule [%s] — replying only, not saving.", rule)
 
-    direction = "positive" if signal > 0 else "negative"
-    logger.info(
-        "Feedback loop: %s signal for rule [%s] in %s — %s",
-        direction, rule, info["repo"], info["file_path"],
-    )
-
-    # Reply to engineer's comment acknowledging the feedback
     _post_feedback_acknowledgement(
         repo=info["repo"],
         in_reply_to_id=info["in_reply_to_id"],
@@ -201,7 +201,8 @@ async def _handle_review_comment(body: bytes) -> JSONResponse:
         signal=signal,
     )
 
-    return JSONResponse({"message": f"Feedback recorded: {direction} for {rule}."}, status_code=200)
+    direction = "positive" if signal > 0 else "negative"
+    return JSONResponse({"message": f"Feedback {direction} for {rule}."}, status_code=200)
 
 
 def _post_feedback_acknowledgement(
@@ -216,9 +217,6 @@ def _post_feedback_acknowledgement(
     from core.feedback_store import _path_context, get_adjustment
 
     ctx = _path_context(file_path) or "this repo"
-    adj = get_adjustment(rule, repo, file_path)
-    net = abs(adj["net_signal"])
-
     if signal < 0:
         body = (
             f"🧠 Got it — I've saved this to my learnings. "
@@ -226,8 +224,7 @@ def _post_feedback_acknowledgement(
         )
     else:
         body = (
-            f"✅ Thanks for confirming! I've noted that `[{rule}]` is a real issue in `{ctx}`. "
-            f"I'll keep flagging similar patterns here ({net} positive signal(s) recorded)."
+            f"✅ Thanks for confirming! I'll keep flagging `[{rule}]` in `{ctx}` on future reviews."
         )
 
     # Find the PR number from a comment on this repo — we need it for the reply endpoint.

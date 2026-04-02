@@ -60,11 +60,6 @@ class Analyser:
         """
         sql_blocks = parse_diff(diff_text)
         code_blocks = parse_code_blocks(diff_text)
-        logger.info(
-            "Extracted %d SQL block(s) and %d code block(s) from diff.",
-            len(sql_blocks),
-            len(code_blocks),
-        )
 
         # Propagate repo to reviewers that support feedback adjustment
         for reviewer in self._sql_reviewers + self._orm_reviewers:
@@ -107,10 +102,6 @@ class Analyser:
                 )
                 return None
             result = reviewer.review(block, schema_context=schema_context)
-            logger.info(
-                "Reviewer %s completed for %s:%d — %d issue(s).",
-                reviewer.name, block.file, block.line, len(result.issues),
-            )
             return (block, result)
 
         work = [
@@ -133,9 +124,6 @@ class Analyser:
                     if out is not None:
                         results.append(out)
                 except Exception:
-                    logger.exception(
-                        "Reviewer %s raised an exception for block at %s:%d.",
-                        reviewer.name, block.file, block.line,
-                    )
+                    logger.exception("Review failed for %s:%d", block.file, block.line)
 
         return results

@@ -59,7 +59,6 @@ class PRCommenter:
             k = _comment_key(c)
             if k:
                 existing_keys[k] = c
-        logger.info("Found %d existing Prism comment(s) on PR #%d.", len(existing_keys), pr_number)
 
         # Post new comments in parallel and track by (path, position, issue_type).
         inline_count = 0
@@ -96,16 +95,8 @@ class PRCommenter:
                         else:
                             inline_count += 1
                             resolved_keys.add(new_key)
-                            logger.info(
-                                "Inline comment posted: %s:%d pos=%d [%s]",
-                                query.file, query.line, pos, issue.type,
-                            )
                     else:
                         inline_count += 1
-                        logger.info(
-                            "Inline comment posted: %s:%d [%s]",
-                            query.file, query.line, issue.type,
-                        )
             except GithubException as exc:
                 logger.warning(
                     "Inline comment failed for %s:%d [%s] (status=%s): %s",
@@ -134,7 +125,6 @@ class PRCommenter:
                 comment.delete()
                 with lock:
                     resolved += 1
-                logger.info("Auto-resolved outdated comment: %s pos=%d [%s]", *key)
             except GithubException as exc:
                 logger.warning("Could not delete outdated comment %d: %s", comment.id, exc)
 

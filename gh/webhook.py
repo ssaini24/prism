@@ -62,6 +62,13 @@ def extract_review_comment_feedback(payload: dict) -> dict | None:
         return None
 
     comment = payload.get("comment", {})
+
+    # Ignore comments posted by the Prism bot to avoid reply loops
+    sender = payload.get("sender", {})
+    sender_type = sender.get("type", "")
+    if sender_type == "Bot":
+        return None
+
     in_reply_to_id = comment.get("in_reply_to_id")
     if not in_reply_to_id:
         return None  # top-level comment, not a reply
