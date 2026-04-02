@@ -106,12 +106,17 @@ class PRCommenter:
         # Build a map so the closure can look up the ReviewResult for each query
         result_map = {id(query): result for query, result in results}
 
-        work = [
-            (query, issue)
-            for query, result in results
-            if result.issues and query.line > 0
-            for issue in result.issues
-        ]
+        # Deduplicate across pipelines — same (file, line, issue_type) from multiple reviewers
+        seen_issues: set[tuple[str, int, str]] = set()
+        work = []
+        for query, result in results:
+            if not result.issues or query.line <= 0:
+                continue
+            for issue in result.issues:
+                key = (query.file, query.line, issue.type)
+                if key not in seen_issues:
+                    seen_issues.add(key)
+                    work.append((query, issue))
         with ThreadPoolExecutor(max_workers=max(1, min(len(work), 6))) as executor:
             futures = [executor.submit(_post_one, query, issue) for query, issue in work]
             for future in as_completed(futures):

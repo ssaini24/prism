@@ -31,13 +31,6 @@ class Settings(BaseSettings):
     enable_orm_review: bool = False
     enable_db_explain: bool = False
 
-    # MySQL read-only connection for EXPLAIN analysis
-    db_host: str = "127.0.0.1"
-    db_port: int = 3306
-    db_user: str = ""
-    db_password: str = ""
-    db_name: str = ""
-
     # App
     log_level: str = "INFO"
     environment: str = "development"

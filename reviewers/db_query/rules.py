@@ -279,37 +279,24 @@ def _check_unsafe_alter(stmt: exp.Expression) -> list[Issue]:
 
 
 def _fetch_table_row_info(table_name: str) -> tuple[int, str] | None:
-    """
-    Return (row_count, human_readable_lock_estimate) for a table.
-
-    Lock time heuristic (MySQL offline ALTER, worst case):
-      < 10k rows   → seconds
-      < 1M rows    → tens of seconds to minutes
-      >= 1M rows   → minutes to hours
-    """
+    """Return (row_count, lock_estimate) for a table via MySQL MCP."""
+    import json, re, subprocess
+    prompt = (
+        f"Use the mysql MCP tool to run this query and return only a JSON object, no explanation:\n"
+        f"SELECT COUNT(*) as cnt FROM `{table_name}`\n"
+        f'Return: {{"cnt": <integer>}}'
+    )
     try:
-        import pymysql
-        from config import settings
-
-        conn = pymysql.connect(
-            host=settings.db_host, port=settings.db_port,
-            user=settings.db_user, password=settings.db_password,
-            database=settings.db_name,
-            connect_timeout=3, read_timeout=5,
-            cursorclass=pymysql.cursors.DictCursor,
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--allowedTools", "mcp__mysql__mysql_query"],
+            capture_output=True, text=True, timeout=30,
         )
-        with conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT TABLE_ROWS FROM information_schema.TABLES "
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
-                    (table_name,),
-                )
-                row = cursor.fetchone()
-                if not row:
-                    return None
-                rows = int(row["TABLE_ROWS"] or 0)
-
+        if proc.returncode != 0:
+            return None
+        match = re.search(r'\{[\s\S]+\}', proc.stdout)
+        if not match:
+            return None
+        rows = int(json.loads(match.group(0)).get("cnt", 0))
         if rows < 10_000:
             estimate = "< 5 seconds"
         elif rows < 100_000:
@@ -320,8 +307,7 @@ def _fetch_table_row_info(table_name: str) -> tuple[int, str] | None:
             estimate = "~10–30 minutes"
         else:
             estimate = "potentially hours — plan a maintenance window"
-
         return rows, estimate
-
-    except Exception:
+    except Exception as exc:
+        logger.debug("MCP row count failed for `%s`: %s", table_name, exc)
         return None

@@ -7,4 +7,3 @@ openai>=1.30.0
 PyGithub==2.5.0
 sqlglot==25.32.0
 python-dotenv==1.0.1
-pymysql>=1.1.0

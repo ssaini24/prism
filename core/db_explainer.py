@@ -1,9 +1,6 @@
 """
-Runs EXPLAIN on SQL queries and computes pre/post-index row scan estimates.
-
-Two backends:
-  - Direct pymysql connection (default)
-  - MySQL MCP server via Claude Code CLI (when LLM_PROVIDER=claude-code)
+Runs EXPLAIN on SQL queries and computes pre/post-index row scan estimates
+via the MySQL MCP server (claude -p with mcp__mysql__mysql_query tool).
 """
 from __future__ import annotations
 
@@ -85,11 +82,8 @@ class ExplainResult:
 
 
 def explain(sql: str) -> ExplainResult | None:
-    """Use MCP when LLM_PROVIDER=claude-code, otherwise direct pymysql."""
-    from config import settings
-    if settings.llm_provider.lower() == "claude-code":
-        return explain_via_mcp(sql)
-    return _explain_direct(sql)
+    """Run EXPLAIN via the MySQL MCP server."""
+    return explain_via_mcp(sql)
 
 
 # ---------------------------------------------------------------------------
@@ -166,98 +160,8 @@ def explain_via_mcp(sql: str) -> ExplainResult | None:
 
 
 # ---------------------------------------------------------------------------
-# Backend: direct pymysql
-# ---------------------------------------------------------------------------
-
-
-def _explain_direct(sql: str) -> ExplainResult | None:
-    """Run EXPLAIN + cardinality queries via a direct pymysql connection."""
-    if _UNSAFE.match(sql) or not _EXPLAINABLE.match(sql):
-        return None
-
-    short = sql.strip()[:80].replace("\n", " ")
-    logger.info("[EXPLAIN/direct] ▶ Running via pymysql: %s...", short)
-
-    try:
-        import pymysql
-        from config import settings
-
-        t0 = time.monotonic()
-        conn = pymysql.connect(
-            host=settings.db_host,
-            port=settings.db_port,
-            user=settings.db_user,
-            password=settings.db_password,
-            database=settings.db_name,
-            connect_timeout=5,
-            read_timeout=10,
-            cursorclass=pymysql.cursors.DictCursor,
-        )
-        with conn:
-            with conn.cursor() as cursor:
-                cursor.execute(f"EXPLAIN {sql}")
-                explain_rows = list(cursor.fetchall())
-
-                cardinality_data = _fetch_cardinality(cursor, sql, explain_rows)
-                scan_estimates = _compute_scan_estimates(explain_rows, cardinality_data)
-
-                elapsed = time.monotonic() - t0
-                result = ExplainResult(rows=explain_rows, warnings=[], scan_estimates=scan_estimates)
-                logger.info("[EXPLAIN/direct] ✓ Done in %.1fs — %s", elapsed, result.summary())
-                _log_scan_estimates(scan_estimates)
-                return result
-
-    except Exception as exc:
-        logger.warning("[EXPLAIN/direct] ✗ Failed: %.80s — %s", short, exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _fetch_cardinality(cursor, sql: str, explain_rows: list[dict]) -> dict:
-    """
-    For each full-scan table, fetch total_rows and per-column distinct counts
-    for the columns referenced in WHERE / JOIN ON clauses.
-    """
-    # Find which tables are doing full scans
-    full_scan_tables = {
-        r.get("table", "")
-        for r in explain_rows
-        if (r.get("type") or "").lower() == "all"
-    }
-    if not full_scan_tables:
-        return {}
-
-    # Extract WHERE columns from the SQL using sqlglot
-    where_cols = _extract_where_columns(sql)
-
-    cardinality: dict = {}
-    for table in full_scan_tables:
-        if not table:
-            continue
-        try:
-            cursor.execute(f"SELECT COUNT(*) as total FROM `{table}`")
-            total_rows = (cursor.fetchone() or {}).get("total", 0)
-        except Exception:
-            total_rows = 0
-
-        # columns for this table (may be keyed by table alias or unqualified)
-        cols = where_cols.get(table, []) or where_cols.get("", [])
-
-        col_cardinalities: dict[str, int] = {}
-        for col in set(cols):
-            try:
-                cursor.execute(f"SELECT COUNT(DISTINCT `{col}`) as c FROM `{table}`")
-                col_cardinalities[col] = (cursor.fetchone() or {}).get("c", 1) or 1
-            except Exception:
-                pass
-
-        cardinality[table] = {"total_rows": total_rows, "columns": col_cardinalities}
-
-    return cardinality
 
 
 def _extract_where_columns(sql: str) -> dict[str, list[str]]:
