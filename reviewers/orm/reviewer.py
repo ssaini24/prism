@@ -9,7 +9,7 @@ from core.orm_translator import translate
 from models.review import ExtractedQuery, Issue, ReviewResult
 from reviewers.base_reviewer import BaseReviewer
 from reviewers.db_query import rules
-from reviewers.db_query.reviewer import _build_static_only_result, _parse_llm_response
+from reviewers.db_query.reviewer import _apply_feedback, _build_static_only_result, _parse_llm_response
 from reviewers.db_query import prompts as sql_prompts
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,10 @@ class ORMReviewer(BaseReviewer):
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
         self._llm = llm_client or create_llm_client()
+        self._repo = ""
+
+    def set_repo(self, repo: str) -> None:
+        self._repo = repo
 
     @property
     def name(self) -> str:
@@ -79,4 +83,5 @@ class ORMReviewer(BaseReviewer):
         if not all_issues:
             return ReviewResult(explanation=f"No issues found in translated {orm} queries.")
 
-        return _build_static_only_result(all_issues)
+        result = _build_static_only_result(all_issues)
+        return _apply_feedback(result, query.file, self._repo)

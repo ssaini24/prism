@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from config import settings
 from core.analyser import Analyser
+from gh.auth import get_token
 from gh.commenter import PRCommenter
 from gh.webhook import extract_pr_info, extract_review_comment_feedback, verify_signature
 
@@ -159,7 +160,7 @@ async def _handle_review_comment(body: bytes) -> JSONResponse:
         resp = _requests.get(
             f"https://api.github.com/repos/{info['repo']}/pulls/comments/{info['in_reply_to_id']}",
             headers={
-                "Authorization": f"token {settings.github_token}",
+                "Authorization": f"token {get_token(info['repo'])}",
                 "Accept": "application/vnd.github.v3+json",
             },
             timeout=10,
@@ -219,18 +220,10 @@ def _post_feedback_acknowledgement(
     net = abs(adj["net_signal"])
 
     if signal < 0:
-        if adj.get("skip"):
-            body = (
-                f"🧠 Understood — I've added this to my learnings. "
-                f"`[{rule}]` has been flagged {net} time(s) in `{ctx}`, "
-                f"so I'll **skip** it there going forward."
-            )
-        else:
-            body = (
-                f"🧠 Got it — I've saved this to my learnings. "
-                f"I'll lower the confidence for `[{rule}]` in `{ctx}` on future reviews "
-                f"({net} negative signal(s) recorded)."
-            )
+        body = (
+            f"🧠 Got it — I've saved this to my learnings. "
+            f"I'll skip `[{rule}]` in `{ctx}` on future reviews."
+        )
     else:
         body = (
             f"✅ Thanks for confirming! I've noted that `[{rule}]` is a real issue in `{ctx}`. "
@@ -243,7 +236,7 @@ def _post_feedback_acknowledgement(
         parent_resp = _requests.get(
             f"https://api.github.com/repos/{repo}/pulls/comments/{in_reply_to_id}",
             headers={
-                "Authorization": f"token {settings.github_token}",
+                "Authorization": f"token {get_token(repo)}",
                 "Accept": "application/vnd.github.v3+json",
             },
             timeout=10,
@@ -262,7 +255,7 @@ def _post_feedback_acknowledgement(
         resp = _requests.post(
             f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments",
             headers={
-                "Authorization": f"token {settings.github_token}",
+                "Authorization": f"token {get_token(repo)}",
                 "Accept": "application/vnd.github.v3+json",
             },
             json={"body": body, "in_reply_to": in_reply_to_id},
@@ -283,7 +276,7 @@ def _fetch_pr_diff(owner: str, repo_name: str, pr_number: int) -> str:
         response = requests.get(
             f"https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}",
             headers={
-                "Authorization": f"token {settings.github_token}",
+                "Authorization": f"token {get_token(f'{owner}/{repo_name}')}",
                 "Accept": "application/vnd.github.v3.diff",
             },
             timeout=30,

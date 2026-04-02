@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from github import Github, GithubException
 from github.PullRequest import PullRequest
 
 from config import settings
+from gh.auth import get_github_client, get_token
 from models.review import ExtractedQuery, Issue, ReviewResult
 
 logger = logging.getLogger(__name__)
@@ -23,7 +26,10 @@ class PRCommenter:
     """Posts inline review comments to a GitHub pull request."""
 
     def __init__(self) -> None:
-        self._gh = Github(settings.github_token)
+        self._repo_full_name = ""
+
+    def _gh(self, repo_full_name: str = "") -> Github:
+        return get_github_client(repo_full_name or self._repo_full_name)
 
     def post_review(
         self,
@@ -33,7 +39,9 @@ class PRCommenter:
         results: list[tuple[ExtractedQuery, ReviewResult]],
         commit_sha: str,
     ) -> None:
-        repo = self._gh.get_repo(f"{owner}/{repo_name}")
+        repo_full_name = f"{owner}/{repo_name}"
+        gh = self._gh(repo_full_name)
+        repo = gh.get_repo(repo_full_name)
         pr: PullRequest = repo.get_pull(pr_number)
         commit = repo.get_commit(commit_sha)
 
@@ -53,31 +61,28 @@ class PRCommenter:
                 existing_keys[k] = c
         logger.info("Found %d existing Prism comment(s) on PR #%d.", len(existing_keys), pr_number)
 
-        # Post new comments and track by (path, position, issue_type) using the
-        # position returned by GitHub after each successful create_review_comment call.
+        # Post new comments in parallel and track by (path, position, issue_type).
         inline_count = 0
         skipped = 0
         resolved_keys: set[tuple[str, int, str]] = set()
+        lock = threading.Lock()
 
-        for query, result in results:
-            if not result.issues or query.line <= 0:
-                continue
-            for issue in result.issues:
-                body = _format_inline_issue(issue, result)
-                try:
-                    posted = pr.create_review_comment(
-                        body=body,
-                        commit=commit,
-                        path=query.file,
-                        line=query.line,
-                        side="RIGHT",
-                    )
-                    pos = getattr(posted, "position", None)
+        def _post_one(query: ExtractedQuery, issue: Issue) -> None:
+            nonlocal inline_count, skipped
+            body = _format_inline_issue(issue, result_map[id(query)])
+            try:
+                posted = pr.create_review_comment(
+                    body=body,
+                    commit=commit,
+                    path=query.file,
+                    line=query.line,
+                    side="RIGHT",
+                )
+                pos = getattr(posted, "position", None)
+                with lock:
                     if pos is not None:
                         new_key = (query.file, pos, issue.type)
                         if new_key in existing_keys:
-                            # Duplicate — delete the one we just posted, keep the existing.
-                            # Mark the existing key as still active so it isn't auto-resolved.
                             try:
                                 posted.delete()
                                 skipped += 1
@@ -87,7 +92,7 @@ class PRCommenter:
                                 )
                             except GithubException:
                                 pass
-                            resolved_keys.add(new_key)  # preserve the existing comment
+                            resolved_keys.add(new_key)
                         else:
                             inline_count += 1
                             resolved_keys.add(new_key)
@@ -101,22 +106,43 @@ class PRCommenter:
                             "Inline comment posted: %s:%d [%s]",
                             query.file, query.line, issue.type,
                         )
-                except GithubException as exc:
-                    logger.warning(
-                        "Inline comment failed for %s:%d [%s] (status=%s): %s",
-                        query.file, query.line, issue.type, exc.status, exc.data,
-                    )
+            except GithubException as exc:
+                logger.warning(
+                    "Inline comment failed for %s:%d [%s] (status=%s): %s",
+                    query.file, query.line, issue.type, exc.status, exc.data,
+                )
+
+        # Build a map so the closure can look up the ReviewResult for each query
+        result_map = {id(query): result for query, result in results}
+
+        work = [
+            (query, issue)
+            for query, result in results
+            if result.issues and query.line > 0
+            for issue in result.issues
+        ]
+        with ThreadPoolExecutor(max_workers=max(1, min(len(work), 6))) as executor:
+            futures = [executor.submit(_post_one, query, issue) for query, issue in work]
+            for future in as_completed(futures):
+                future.result()  # re-raise any unexpected exceptions
 
         # Delete existing comments whose issue was not re-raised (addressed in new commit)
         resolved = 0
-        for key, comment in existing_keys.items():
-            if key not in resolved_keys:
-                try:
-                    comment.delete()
+        def _delete_one(key, comment):
+            nonlocal resolved
+            try:
+                comment.delete()
+                with lock:
                     resolved += 1
-                    logger.info("Auto-resolved outdated comment: %s pos=%d [%s]", *key)
-                except GithubException as exc:
-                    logger.warning("Could not delete outdated comment %d: %s", comment.id, exc)
+                logger.info("Auto-resolved outdated comment: %s pos=%d [%s]", *key)
+            except GithubException as exc:
+                logger.warning("Could not delete outdated comment %d: %s", comment.id, exc)
+
+        stale = [(k, c) for k, c in existing_keys.items() if k not in resolved_keys]
+        if stale:
+            with ThreadPoolExecutor(max_workers=min(len(stale), 6)) as executor:
+                for future in as_completed([executor.submit(_delete_one, k, c) for k, c in stale]):
+                    future.result()
 
         logger.info(
             "Comments — posted: %d | skipped (duplicate): %d | auto-resolved: %d",

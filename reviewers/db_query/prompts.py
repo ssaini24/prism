@@ -44,6 +44,10 @@ Rules:
 - index_suggestions should be actionable CREATE INDEX statements or empty.
 - migration_warnings should flag destructive operations (DROP, TRUNCATE, column removals).
 - Keep explanation concise (2-4 sentences max).
+- The "type" field MUST be one of the following canonical values — never invent new ones:
+  select_star, missing_where_clause, function_on_indexed_column, join_without_condition,
+  n_plus_one_pattern, destructive_ddl, unsafe_alter_table, full_table_scan,
+  missing_index, inefficient_subquery, implicit_type_conversion, unbounded_result_set
 """
 
 

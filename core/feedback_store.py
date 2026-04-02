@@ -8,9 +8,6 @@ Engineers reply to Prism inline comments with natural language:
 Signals are stored per (rule, repo, path_context) where path_context is the
 leading directory of the file (e.g. "database/migrations", "app/Http/Controllers").
 This means the same rule can be marked as intentional in one context and real in another.
-
-Built-in suppressions handle universally known safe patterns so engineers
-don't have to teach Prism from scratch on every repo.
 """
 from __future__ import annotations
 
@@ -22,46 +19,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "feedback.db"
-
-# ---------------------------------------------------------------------------
-# Built-in suppressions
-# Hardcoded known-safe contexts — no feedback needed, Prism already knows.
-# Format: {rule: [(path_prefix, note), ...]}
-# ---------------------------------------------------------------------------
-_BUILT_IN_SUPPRESSIONS: dict[str, list[tuple[str, str]]] = {
-    "destructive_ddl": [
-        (
-            "database/migrations",
-            "DROP/TRUNCATE inside a migration file is expected — "
-            "this is likely the `down()` rollback method.",
-        ),
-        (
-            "database/seeders",
-            "Destructive DDL in a seeder is expected for test data setup.",
-        ),
-        (
-            "tests",
-            "Destructive DDL in test files is expected for fixture teardown.",
-        ),
-    ],
-    "missing_where_clause": [
-        (
-            "database/seeders",
-            "Unbounded UPDATE/DELETE in a seeder is expected — seeders truncate and reload test data.",
-        ),
-        (
-            "tests",
-            "Unbounded UPDATE/DELETE in test files is expected for fixture cleanup.",
-        ),
-    ],
-    "unsafe_alter_table": [
-        (
-            "database/migrations",
-            "ALTER TABLE in migrations is expected. "
-            "Ensure ALGORITHM=INPLACE, LOCK=NONE are set for large tables.",
-        ),
-    ],
-}
 
 # ---------------------------------------------------------------------------
 # Signal detection
@@ -78,9 +35,7 @@ _POSITIVE = re.compile(
     re.IGNORECASE,
 )
 
-_DOWNGRADE_THRESHOLD = -1
-_SUPPRESS_THRESHOLD  = -2
-_SKIP_THRESHOLD      = -3
+_SKIP_THRESHOLD = -1  # one false positive = skip in this context going forward
 
 
 # ---------------------------------------------------------------------------
@@ -152,66 +107,43 @@ def get_adjustment(rule: str, repo: str, file_path: str) -> dict:
     """
     Return adjustment metadata for a rule given the file it fired in.
 
-    Checks built-in suppressions first (context-aware hardcoded rules),
-    then learned feedback from the team.
+    Checks learned feedback from the team (feedback.db only — no hardcoded rules).
 
     Returns:
         {
           "net_signal":     int,
-          "severity_delta": -1 | 0,
+          "severity_delta": 0,
+          "skip":           bool,
           "label":          str | None,
-          "source":         "builtin" | "learned" | "none",
+          "source":         "learned" | "none",
         }
     """
     ctx = _path_context(file_path)
 
-    # 1. Check built-in suppressions
-    builtin_note = _check_builtin(rule, file_path)
-    if builtin_note:
-        return {
-            "net_signal": -1,
-            "severity_delta": -1,
-            "label": f"ℹ️ {builtin_note}",
-            "source": "builtin",
-        }
-
-    # 2. Check learned feedback (exact repo+context, then cross-context fallback)
+    # Exact repo+context match, then repo-wide fallback
     net = _query_net_signal(rule, repo, ctx)
     if net == 0 and ctx:
-        net = _query_net_signal(rule, repo, "")  # repo-wide fallback
+        net = _query_net_signal(rule, repo, "")
 
     if net <= _SKIP_THRESHOLD:
         return {
             "net_signal": net,
-            "severity_delta": -1,
+            "severity_delta": 0,
             "skip": True,
             "label": None,
             "source": "learned",
         }
-    if net <= _SUPPRESS_THRESHOLD:
-        return {
-            "net_signal": net,
-            "severity_delta": -1,
-            "skip": False,
-            "label": f"⚠️ Your team has flagged this as a false positive {abs(net)} time(s) in `{ctx or 'this repo'}` — review carefully.",
-            "source": "learned",
-        }
-    if net <= _DOWNGRADE_THRESHOLD:
-        return {
-            "net_signal": net,
-            "severity_delta": -1,
-            "label": f"_Your team has marked similar findings as false positives in `{ctx or 'this repo'}` ({abs(net)}x)._",
-            "source": "learned",
-        }
+
     if net >= 3:
         return {
             "net_signal": net,
             "severity_delta": 0,
+            "skip": False,
             "label": f"_Confirmed issue pattern for your team in `{ctx or 'this repo'}` ({net}x)._",
             "source": "learned",
         }
 
-    return {"net_signal": net, "severity_delta": 0, "label": None, "source": "none"}
+    return {"net_signal": net, "severity_delta": 0, "skip": False, "label": None, "source": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -231,18 +163,7 @@ def _path_context(file_path: str) -> str:
     parts = Path(file_path).parts
     if len(parts) <= 1:
         return ""
-    # Use up to the last directory component (not the filename)
     return str(Path(*parts[:-1]))
-
-
-def _check_builtin(rule: str, file_path: str) -> str | None:
-    """Return a built-in suppression note if this file matches a known-safe context."""
-    suppressions = _BUILT_IN_SUPPRESSIONS.get(rule, [])
-    norm = file_path.replace("\\", "/")
-    for prefix, note in suppressions:
-        if norm.startswith(prefix) or f"/{prefix}/" in norm:
-            return note
-    return None
 
 
 def _query_net_signal(rule: str, repo: str, path_context: str) -> int:

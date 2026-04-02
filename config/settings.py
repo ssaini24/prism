@@ -11,9 +11,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # GitHub
+    # GitHub — personal token (fallback) or App credentials (preferred)
     github_webhook_secret: str = ""
-    github_token: str = ""
+    github_token: str = ""          # PAT — used only if App credentials are not set
+    github_app_id: int = 0          # GitHub App ID
+    github_app_private_key: str = ""  # Contents of the .pem file (newlines as \n)
 
     # LLM — set LLM_PROVIDER to "openai" or "anthropic"
     llm_provider: str = "openai"

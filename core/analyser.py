@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.diff_parser import parse_code_blocks, parse_diff
 from core.llm_client import create_llm_client
@@ -70,10 +71,26 @@ class Analyser:
             if hasattr(reviewer, "set_repo"):
                 reviewer.set_repo(repo)
 
+        # Run all three pipelines concurrently — they operate on independent block sets
         results: list[tuple[ExtractedQuery, ReviewResult]] = []
-        results.extend(self._run(sql_blocks, self._sql_reviewers, schema_context))
-        results.extend(self._run(code_blocks, self._code_reviewers, schema_context))
-        results.extend(self._run(code_blocks, self._orm_reviewers, schema_context))
+        pipelines = [
+            (sql_blocks,  self._sql_reviewers),
+            (code_blocks, self._code_reviewers),
+            (code_blocks, self._orm_reviewers),
+        ]
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(self._run, blocks, reviewers, schema_context): name
+                for (blocks, reviewers), name in zip(pipelines, ["sql", "code", "orm"])
+                if reviewers
+            }
+            for future in as_completed(futures):
+                pipeline_name = futures[future]
+                try:
+                    results.extend(future.result())
+                except Exception:
+                    logger.exception("Pipeline '%s' raised an exception.", pipeline_name)
+
         return results
 
     def _run(
@@ -82,25 +99,43 @@ class Analyser:
         reviewers: list[BaseReviewer],
         schema_context: str,
     ) -> list[tuple[ExtractedQuery, ReviewResult]]:
+        def _review_one(block: ExtractedQuery, reviewer: BaseReviewer):
+            if not reviewer.can_review(block):
+                logger.debug(
+                    "Reviewer %s skipped block at %s:%d",
+                    reviewer.name, block.file, block.line,
+                )
+                return None
+            result = reviewer.review(block, schema_context=schema_context)
+            logger.info(
+                "Reviewer %s completed for %s:%d — %d issue(s).",
+                reviewer.name, block.file, block.line, len(result.issues),
+            )
+            return (block, result)
+
+        work = [
+            (block, reviewer)
+            for block in blocks
+            for reviewer in reviewers
+        ]
+
+        if not work:
+            return []
+
+        # Parallelize LLM calls across all (block, reviewer) pairs
         results: list[tuple[ExtractedQuery, ReviewResult]] = []
-        for block in blocks:
-            for reviewer in reviewers:
-                if not reviewer.can_review(block):
-                    logger.debug(
-                        "Reviewer %s skipped block at %s:%d",
-                        reviewer.name, block.file, block.line,
-                    )
-                    continue
+        with ThreadPoolExecutor(max_workers=max(1, min(len(work), 8))) as executor:
+            futures = {executor.submit(_review_one, block, reviewer): (block, reviewer) for block, reviewer in work}
+            for future in as_completed(futures):
+                block, reviewer = futures[future]
                 try:
-                    result = reviewer.review(block, schema_context=schema_context)
-                    results.append((block, result))
-                    logger.info(
-                        "Reviewer %s completed for %s:%d — %d issue(s).",
-                        reviewer.name, block.file, block.line, len(result.issues),
-                    )
+                    out = future.result()
+                    if out is not None:
+                        results.append(out)
                 except Exception:
                     logger.exception(
                         "Reviewer %s raised an exception for block at %s:%d.",
                         reviewer.name, block.file, block.line,
                     )
+
         return results
