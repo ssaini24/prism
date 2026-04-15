@@ -208,6 +208,8 @@ def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
         lines += ["", "**Index suggestions:**"]
         for s in result.index_suggestions:
             lines.append(f"```sql\n{s}\n```")
+    if result.cost_analysis and result.cost_analysis.basis == "explain":
+        lines += ["", "> 📊 _Analysis backed by live EXPLAIN data via MySQL MCP._"]
     return "\n".join(lines)
 
 

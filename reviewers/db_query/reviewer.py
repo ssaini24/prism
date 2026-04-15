@@ -72,11 +72,11 @@ class DBQueryReviewer(BaseReviewer):
         static_issues: list[Issue],
     ) -> ReviewResult:
         from config import settings
-        from core.db_explainer import explain
+        from core.db_explainer import explain_via_mcp
 
         explain_result = None
-        if settings.enable_db_explain:
-            result = explain(query)
+        if settings.enable_db_analysis_via_mcp:
+            result = explain_via_mcp(query)
             if result and result.has_issues():
                 explain_result = result.to_dict()
 

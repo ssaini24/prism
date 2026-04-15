@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Feature flags
     enable_code_review: bool = False
     enable_orm_review: bool = False
-    enable_db_explain: bool = False
+    enable_db_analysis_via_mcp: bool = False
 
     # App
     log_level: str = "INFO"

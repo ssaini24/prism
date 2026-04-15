@@ -50,7 +50,7 @@ class ORMReviewer(BaseReviewer):
 
         # Step 2: run static rules + EXPLAIN + LLM on each translated query
         from config import settings
-        from core.db_explainer import explain
+        from core.db_explainer import explain_via_mcp
 
         all_issues: list[Issue] = []
         for sql in sql_queries:
@@ -58,10 +58,10 @@ class ORMReviewer(BaseReviewer):
             all_issues.extend(static_issues)
 
             explain_result = None
-            if settings.enable_db_explain:
-                exp = explain(sql)
-                if exp and exp.has_issues():
-                    explain_result = exp.to_dict()
+            if settings.enable_db_analysis_via_mcp:
+                result = explain_via_mcp(sql)
+                if result and result.has_issues():
+                    explain_result = result.to_dict()
 
             try:
                 user_prompt = sql_prompts.build_user_prompt(
