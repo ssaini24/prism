@@ -52,7 +52,7 @@ jobs:
           extensions: pdo, pdo_mysql, mbstring
 
       - name: Install target repo PHP dependencies
-        run: composer install --no-interaction --prefer-dist --no-progress
+        run: composer install --no-interaction --prefer-dist --no-progress --ignore-platform-reqs
         working-directory: target-repo
 
       - name: Install Laravel Boost (skipped if incompatible)

@@ -4,10 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import sys
 from typing import Any
 
-from gh.commenter import PRCommenter
-from models.review import ExtractedQuery, ReviewResult
+# Make the project root importable when this script is invoked from the action/ subdirectory
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from gh.commenter import PRCommenter  # noqa: E402
+from models.review import ExtractedQuery, ReviewResult  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
