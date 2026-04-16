@@ -1,0 +1,20 @@
+# Copy to .github/workflows/prism-review.yml in your repo.
+#
+# Required secrets in your repo (Settings → Secrets → Actions):
+#   ANTHROPIC_API_KEY — your Anthropic API key
+#   APP_KEY           — your Laravel APP_KEY (for running migrations in CI)
+#
+name: Prism Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    uses: ssaini24/prism/.github/workflows/review.yml@main
+    with:
+      # Remove this line (or set to "anthropic") once ANTHROPIC_API_KEY is set
+      llm_provider: "anthropic"
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
