@@ -83,7 +83,7 @@ jobs:
       - name: Fetch PR diff
         run: |
           gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files \
-            --jq '[.[].patch // ""] | join("\n")' > /tmp/pr.diff
+            --jq '.[] | "--- a/\(.filename)\n+++ b/\(.filename)\n\(.patch // "")"' > /tmp/pr.diff
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -94,6 +94,7 @@ jobs:
             --output=/tmp/orm-results.json \
             --laravel-path=${{ github.workspace }}/target-repo
         env:
+          APP_KEY: base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
           DB_CONNECTION: mysql
           DB_HOST: 127.0.0.1
           DB_PORT: 3306
