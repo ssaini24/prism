@@ -1,11 +1,14 @@
 """
-PHP/Eloquent ORM reviewer that analyzes PR diffs using `claude -p` with
-Laravel Boost MCP as the schema tool. Follows the same subprocess pattern
-as core/db_explainer.py.
+PHP/Eloquent ORM reviewer.
+
+Provider selection via LLM_PROVIDER env var:
+  anthropic   — Anthropic Python SDK + mcp client for Boost (default; needs ANTHROPIC_API_KEY)
+  claude-code — `claude -p` subprocess + --mcp-config for Boost (local dev; no API key needed)
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -67,6 +70,14 @@ _MCP_TOOLS = ",".join([
     "mcp__laravel-boost__application-info",
 ])
 
+_DB_ENV_KEYS = (
+    "APP_KEY", "DB_CONNECTION", "DB_HOST", "DB_PORT",
+    "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD",
+)
+
+
+# ── diff parsing ──────────────────────────────────────────────────────────────
+
 
 def extract_php_blocks(diff: str) -> list[dict]:
     """
@@ -75,72 +86,70 @@ def extract_php_blocks(diff: str) -> list[dict]:
     for PHP files only (.php extension). Only added lines (+ prefix) are
     included. All added lines from the same PHP file are grouped into one block.
     """
-    blocks: dict[str, dict] = {}  # file -> {"file", "line", "raw_lines": []}
+    blocks: dict[str, dict] = {}
     current_file: str | None = None
-    current_line: int = 0
-    hunk_new_start: int = 0
     hunk_new_line: int = 0
 
     for raw_line in diff.splitlines():
-        # Detect file header: +++ b/path/to/file.php
         file_match = re.match(r'^\+\+\+\s+b/(.+)$', raw_line)
         if file_match:
             path = file_match.group(1)
             current_file = path if path.endswith('.php') else None
-            hunk_new_start = 0
             hunk_new_line = 0
             continue
 
-        # Detect hunk header: @@ -old_start,old_count +new_start,new_count @@
         hunk_match = re.match(r'^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@', raw_line)
         if hunk_match:
-            hunk_new_start = int(hunk_match.group(1))
-            hunk_new_line = hunk_new_start
+            hunk_new_line = int(hunk_match.group(1))
             continue
 
         if current_file is None:
-            # Track line numbers for non-PHP files too (so we skip correctly)
-            if raw_line.startswith('+') and not raw_line.startswith('+++'):
-                pass
-            elif raw_line.startswith('-') and not raw_line.startswith('---'):
-                pass
-            else:
-                if not raw_line.startswith('-'):
-                    hunk_new_line += 1
+            if not raw_line.startswith('-'):
+                hunk_new_line += 1
             continue
 
-        # Added line
         if raw_line.startswith('+') and not raw_line.startswith('+++'):
-            line_content = raw_line[1:]  # strip leading +
             entry = blocks.setdefault(current_file, {
                 "file": current_file,
                 "line": hunk_new_line,
                 "raw_lines": [],
             })
-            entry["raw_lines"].append(line_content)
+            entry["raw_lines"].append(raw_line[1:])
             hunk_new_line += 1
         elif raw_line.startswith('-') and not raw_line.startswith('---'):
-            # Removed line — doesn't advance new-file line counter
             pass
         else:
-            # Context line — advances new-file line counter
             hunk_new_line += 1
 
-    result = []
-    for entry in blocks.values():
-        result.append({
-            "file": entry["file"],
-            "line": entry["line"],
-            "raw": "\n".join(entry["raw_lines"]),
-        })
-    return result
+    return [
+        {"file": e["file"], "line": e["line"], "raw": "\n".join(e["raw_lines"])}
+        for e in blocks.values()
+    ]
 
 
-def write_boost_config(work_dir: str, artisan_path: str) -> str:
-    """
-    Write a JSON MCP config file for `claude --mcp-config` to work_dir.
-    Returns the path to the written config file.
-    """
+# ── Boost detection ───────────────────────────────────────────────────────────
+
+
+def boost_available(artisan_path: str) -> bool:
+    """Return True if `php artisan boost:mcp` exists in the target Laravel app."""
+    try:
+        proc = subprocess.run(
+            ["php", artisan_path, "list", "--format=json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ},
+        )
+        return "boost:mcp" in proc.stdout
+    except Exception:
+        return False
+
+
+# ── claude-code provider ──────────────────────────────────────────────────────
+
+
+def _write_boost_config(work_dir: str, artisan_path: str) -> str:
+    """Write a JSON MCP config for `claude --mcp-config`. Returns the file path."""
     config = {
         "mcpServers": {
             "laravel-boost": {
@@ -149,45 +158,23 @@ def write_boost_config(work_dir: str, artisan_path: str) -> str:
             }
         }
     }
-    config_path = os.path.join(work_dir, "boost-mcp-config.json")
-    with open(config_path, "w") as fh:
+    path = os.path.join(work_dir, "boost-mcp-config.json")
+    with open(path, "w") as fh:
         json.dump(config, fh, indent=2)
-    return config_path
+    return path
 
 
-def boost_available(artisan_path: str) -> bool:
+def _call_claude_code(block: dict, config_path: str | None) -> list[dict]:
     """
-    Check whether the Laravel Boost MCP command is available by running
-    `php <artisan_path> list --format=json` and looking for "boost:mcp" in stdout.
-    Returns False on any exception.
-    """
-    try:
-        proc = subprocess.run(
-            ["php", artisan_path, "list", "--format=json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return "boost:mcp" in proc.stdout
-    except Exception:
-        return False
-
-
-def call_llm_with_boost(block: dict, config_path: str | None) -> list[dict]:
-    """
-    Call `claude -p <prompt> [--mcp-config <path> --allowedTools ...]` for the
-    given PHP block. Returns a parsed JSON list of review results.
-
-    Falls back to LLM-only (no MCP flags) if config_path is None.
-    Returns [] on timeout (120s), non-zero exit, or JSON parse error.
+    Call `claude -p <prompt> [--mcp-config ... --allowedTools ...]`.
+    config_path=None means no Boost (LLM-only).
     """
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        f"Review the following PHP/Eloquent code from file `{block['file']}` "
-        f"(starting at line {block['line']}):\n\n"
+        f"Review the following PHP/Eloquent code from `{block['file']}` "
+        f"(line {block['line']}):\n\n"
         f"```php\n{block['raw']}\n```\n\n"
-        "Return a JSON array of findings as described above. "
-        "Return [] if there are no issues."
+        "Return a JSON array of findings. Return [] if no issues."
     )
 
     cmd = ["claude", "-p", prompt]
@@ -195,56 +182,188 @@ def call_llm_with_boost(block: dict, config_path: str | None) -> list[dict]:
         cmd += ["--mcp-config", config_path, "--allowedTools", _MCP_TOOLS]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
-            logger.warning(
-                "[ORM/LLM] Non-zero exit %d for %s: %s",
-                proc.returncode,
-                block["file"],
-                proc.stderr[:300],
-            )
+            logger.warning("[ORM/claude-code] Exit %d for %s: %s",
+                           proc.returncode, block["file"], proc.stderr[:300])
             return []
-
-        output = proc.stdout.strip()
-        # Strip markdown fences if present
-        cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", output).strip()
-        # Find JSON array
-        match = re.search(r'\[[\s\S]*\]', cleaned)
-        if not match:
-            logger.warning("[ORM/LLM] No JSON array in response for %s: %.200s", block["file"], output)
-            return []
-
-        return json.loads(match.group(0))
-
+        return _parse_json_response(proc.stdout)
     except subprocess.TimeoutExpired:
-        logger.warning("[ORM/LLM] Timed out after 120s for %s", block["file"])
+        logger.warning("[ORM/claude-code] Timed out for %s", block["file"])
         return []
     except Exception as exc:
-        logger.warning("[ORM/LLM] Error reviewing %s: %s", block["file"], exc)
+        logger.warning("[ORM/claude-code] Error for %s: %s", block["file"], exc)
+        return []
+
+
+# ── anthropic provider ────────────────────────────────────────────────────────
+
+
+def _parse_json_response(text: str) -> list[dict]:
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", text.strip()).strip()
+    match = re.search(r'\[[\s\S]*\]', cleaned)
+    if not match:
+        logger.warning("[ORM] No JSON array in response: %.200s", text)
+        return []
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        logger.warning("[ORM] JSON parse error: %s", exc)
+        return []
+
+
+async def _call_anthropic_with_boost(
+    block: dict,
+    artisan_path: str,
+    api_key: str,
+    model: str,
+    db_env: dict,
+) -> list[dict]:
+    """Anthropic SDK agentic loop with Boost MCP tools (schema-aware)."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    import anthropic as sdk
+
+    server_params = StdioServerParameters(
+        command="php",
+        args=[artisan_path, "boost:mcp"],
+        env={**os.environ, **db_env},
+    )
+
+    client = sdk.Anthropic(api_key=api_key)
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            mcp_tools = (await session.list_tools()).tools
+            tools = [
+                {
+                    "name": t.name,
+                    "description": t.description or "",
+                    "input_schema": t.inputSchema,
+                }
+                for t in mcp_tools
+            ]
+
+            messages: list[dict] = [{
+                "role": "user",
+                "content": (
+                    f"Review this PHP/Eloquent code from `{block['file']}` "
+                    f"(line {block['line']}):\n\n```php\n{block['raw']}\n```\n\n"
+                    "Return a JSON array of findings as described. Return [] if no issues."
+                ),
+            }]
+
+            for _ in range(10):  # max agentic turns
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=2048,
+                    system=SYSTEM_PROMPT,
+                    messages=messages,
+                    tools=tools,
+                )
+
+                if response.stop_reason == "end_turn":
+                    for cb in response.content:
+                        if hasattr(cb, "text"):
+                            return _parse_json_response(cb.text)
+                    return []
+
+                if response.stop_reason == "tool_use":
+                    messages.append({
+                        "role": "assistant",
+                        "content": [cb.model_dump() for cb in response.content],
+                    })
+                    tool_results = []
+                    for cb in response.content:
+                        if cb.type == "tool_use":
+                            try:
+                                result = await session.call_tool(cb.name, cb.input)
+                                result_text = "\n".join(
+                                    r.text for r in result.content if hasattr(r, "text")
+                                )
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": cb.id,
+                                    "content": result_text,
+                                })
+                            except Exception as exc:
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": cb.id,
+                                    "content": f"Tool error: {exc}",
+                                    "is_error": True,
+                                })
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    break
+
+    return []
+
+
+async def _call_anthropic_no_boost(block: dict, api_key: str, model: str) -> list[dict]:
+    """Anthropic SDK call without MCP tools (static-only fallback)."""
+    import anthropic as sdk
+
+    client = sdk.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Review this PHP/Eloquent code from `{block['file']}` "
+                f"(line {block['line']}):\n\n```php\n{block['raw']}\n```\n\n"
+                "Return a JSON array of findings as described. Return [] if no issues."
+            ),
+        }],
+    )
+    for cb in response.content:
+        if hasattr(cb, "text"):
+            return _parse_json_response(cb.text)
+    return []
+
+
+# ── orchestration ─────────────────────────────────────────────────────────────
+
+
+def _call_block(
+    block: dict,
+    provider: str,
+    use_boost: bool,
+    artisan_path: str | None,
+    config_path: str | None,
+    api_key: str | None,
+    model: str,
+    db_env: dict,
+) -> list[dict]:
+    try:
+        if provider == "claude-code":
+            return _call_claude_code(block, config_path if use_boost else None)
+        else:
+            if use_boost and artisan_path:
+                return asyncio.run(
+                    _call_anthropic_with_boost(block, artisan_path, api_key, model, db_env)
+                )
+            else:
+                return asyncio.run(_call_anthropic_no_boost(block, api_key, model))
+    except Exception as exc:
+        logger.warning("[ORM] Unexpected error for %s: %s", block["file"], exc)
         return []
 
 
 def review_blocks(
     blocks: list[dict],
+    provider: str,
+    use_boost: bool,
+    artisan_path: str | None,
     config_path: str | None,
+    api_key: str | None,
+    model: str,
     output_path: str,
+    db_env: dict,
 ) -> None:
-    """
-    For each block call call_llm_with_boost, collect results, and write an
-    artifact JSON file at output_path.
-
-    Output shape:
-      [{"query": {"raw": "...", "file": "...", "line": 1, "suppressed": false},
-        "result": {...ReviewResult shape...}}]
-
-    If blocks is empty, writes [] immediately.
-    """
     if not blocks:
         with open(output_path, "w") as fh:
             json.dump([], fh)
@@ -252,11 +371,10 @@ def review_blocks(
 
     artifacts = []
     for block in blocks:
-        llm_results = call_llm_with_boost(block, config_path)
-
-        # llm_results is a list of result objects; use first, or empty dict
+        llm_results = _call_block(
+            block, provider, use_boost, artisan_path, config_path, api_key, model, db_env
+        )
         result = llm_results[0] if llm_results else {}
-
         artifacts.append({
             "query": {
                 "raw": block["raw"],
@@ -272,17 +390,23 @@ def review_blocks(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Review PHP/Eloquent ORM code from a PR diff."
-    )
+    parser = argparse.ArgumentParser(description="Review PHP/Eloquent ORM code from a PR diff.")
     parser.add_argument("--diff", required=True, help="Path to the unified diff file")
     parser.add_argument("--output", required=True, help="Path for the output JSON artifact")
-    parser.add_argument(
-        "--laravel-path",
-        default=None,
-        help="Path to the Laravel project root (used to locate artisan)",
-    )
+    parser.add_argument("--laravel-path", default=None, help="Laravel project root (locates artisan)")
     args = parser.parse_args()
+
+    provider = os.environ.get("LLM_PROVIDER", "anthropic").lower()
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    model = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
+
+    if provider == "anthropic" and not api_key:
+        logger.warning("[ORM] LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set — skipping analysis")
+        with open(args.output, "w") as fh:
+            json.dump([], fh)
+        return
+
+    db_env = {k: os.environ[k] for k in _DB_ENV_KEYS if k in os.environ}
 
     with open(args.diff) as fh:
         diff_text = fh.read()
@@ -290,18 +414,26 @@ def main() -> None:
     blocks = extract_php_blocks(diff_text)
     logger.info("[ORM] Extracted %d PHP block(s) from diff", len(blocks))
 
-    config_path: str | None = None
+    use_boost = False
+    artisan_path = None
+    config_path = None
+    tmp_dir = None
+
     if args.laravel_path:
         artisan_path = os.path.join(args.laravel_path, "artisan")
         if boost_available(artisan_path):
-            with tempfile.TemporaryDirectory() as work_dir:
-                config_path = write_boost_config(work_dir, artisan_path)
-                review_blocks(blocks, config_path, args.output)
-                return
+            use_boost = True
+            logger.info("[ORM] Boost MCP available — schema-aware analysis enabled")
+            if provider == "claude-code":
+                tmp_dir = tempfile.mkdtemp()
+                config_path = _write_boost_config(tmp_dir, artisan_path)
         else:
-            logger.warning("[ORM] Laravel Boost not available at %s — falling back to LLM-only", artisan_path)
+            logger.warning("[ORM] Boost not available at %s — LLM-only", artisan_path)
 
-    review_blocks(blocks, config_path, args.output)
+    review_blocks(
+        blocks, provider, use_boost, artisan_path, config_path,
+        api_key, model, args.output, db_env,
+    )
 
 
 if __name__ == "__main__":

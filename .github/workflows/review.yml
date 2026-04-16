@@ -94,6 +94,9 @@ jobs:
             --output=/tmp/orm-results.json \
             --laravel-path=${{ github.workspace }}/target-repo
         env:
+          LLM_PROVIDER: ${{ inputs.llm_provider }}
+          LLM_MODEL: claude-haiku-4-5-20251001
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           APP_KEY: base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
           DB_CONNECTION: mysql
           DB_HOST: 127.0.0.1

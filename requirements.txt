@@ -7,3 +7,4 @@ openai>=1.30.0
 PyGithub==2.5.0
 sqlglot==25.32.0
 python-dotenv==1.0.1
+mcp>=1.0.0
