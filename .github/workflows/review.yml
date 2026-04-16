@@ -45,23 +45,29 @@ jobs:
           repository: ssaini24/prism
           path: prism-action
 
-      - name: Setup PHP 8.1
+      - name: Setup PHP 8.2
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.1"
+          php-version: "8.2"
           extensions: pdo, pdo_mysql, mbstring
 
       - name: Install target repo PHP dependencies
-        run: composer install --no-interaction --prefer-dist --no-progress --ignore-platform-reqs
+        run: composer install --no-interaction --prefer-dist --no-progress --ignore-platform-reqs --no-scripts
         working-directory: target-repo
+        continue-on-error: true
 
       - name: Install Laravel Boost (skipped if incompatible)
-        run: composer require laravel/boost --dev --no-interaction || echo "Boost install skipped"
+        run: composer require laravel/boost --dev --no-interaction --ignore-platform-reqs || echo "Boost install skipped"
+        working-directory: target-repo
+
+      - name: Register packages (package:discover)
+        run: php artisan package:discover --ansi || true
         working-directory: target-repo
 
       - name: Run database migrations
         run: php artisan migrate --force
         working-directory: target-repo
+        continue-on-error: true
         env:
           APP_KEY: ${{ secrets.APP_KEY || 'base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=' }}
           DB_CONNECTION: mysql
