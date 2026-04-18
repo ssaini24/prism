@@ -13,6 +13,8 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: false
+      CLAUDE_ACCESS_TOKEN:
+        required: false
 
 jobs:
   # ── Job 1: ORM analysis (PHP + optional Boost MCP + real MySQL) ──────────
@@ -83,6 +85,16 @@ jobs:
       - name: Install Claude CLI
         if: inputs.llm_provider == 'claude-code'
         run: npm install -g @anthropic-ai/claude-code
+
+      - name: Configure Claude credentials
+        if: inputs.llm_provider == 'claude-code' && secrets.CLAUDE_ACCESS_TOKEN != ''
+        run: |
+          mkdir -p ~/.claude
+          echo '{
+            "claudeAiOauth": {
+              "accessToken": "${{ secrets.CLAUDE_ACCESS_TOKEN }}"
+            }
+          }' > ~/.claude/.credentials.json
 
       - name: Fetch PR diff
         run: |
