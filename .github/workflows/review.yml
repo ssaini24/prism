@@ -13,7 +13,7 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: false
-      CLAUDE_ACCESS_TOKEN:
+      CLAUDE_CREDENTIALS:
         required: false
 
 jobs:
@@ -87,14 +87,10 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Configure Claude credentials
-        if: inputs.llm_provider == 'claude-code' && secrets.CLAUDE_ACCESS_TOKEN != ''
+        if: inputs.llm_provider == 'claude-code'
         run: |
           mkdir -p ~/.claude
-          echo '{
-            "claudeAiOauth": {
-              "accessToken": "${{ secrets.CLAUDE_ACCESS_TOKEN }}"
-            }
-          }' > ~/.claude/.credentials.json
+          echo '${{ secrets.CLAUDE_CREDENTIALS }}' > ~/.claude/.credentials.json
 
       - name: Fetch PR diff
         run: |
