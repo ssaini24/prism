@@ -75,18 +75,71 @@ _DB_ENV_KEYS = (
     "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD",
 )
 
+# ── cost tracking ─────────────────────────────────────────────────────────────
+
+_COST_PER_1K: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-6":         (0.003,   0.015),
+    "claude-haiku-4-5-20251001": (0.00025, 0.00125),
+}
+
+_usage: dict = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+
+
+def _track_usage(model: str, input_tokens: int, output_tokens: int) -> None:
+    _usage["calls"] += 1
+    _usage["input_tokens"] += input_tokens
+    _usage["output_tokens"] += output_tokens
+
+
+def _log_cost_summary(model: str) -> None:
+    cost_in, cost_out = _COST_PER_1K.get(model, (0.0, 0.0))
+    cost = (_usage["input_tokens"] / 1000 * cost_in) + (_usage["output_tokens"] / 1000 * cost_out)
+    logger.info("[ORM] ── Cost Summary ──────────────────────────────────")
+    logger.info("[ORM]   model    : %s", model)
+    logger.info("[ORM]   calls    : %d", _usage["calls"])
+    logger.info("[ORM]   input    : %d tokens", _usage["input_tokens"])
+    logger.info("[ORM]   output   : %d tokens", _usage["output_tokens"])
+    logger.info("[ORM]   est cost : $%.6f", cost)
+    logger.info("[ORM] ───────────────────────────────────────────────────")
+
 
 # ── diff parsing ──────────────────────────────────────────────────────────────
 
 
+def _split_into_method_blocks(file: str, raw: str, base_line: int) -> list[dict]:
+    """
+    Split a PHP file's added content into per-method blocks.
+    Each block is prepended with the file header (namespace, imports, class
+    declaration) so the LLM has full context for every method.
+    Falls back to a single block when fewer than 2 methods are found.
+    """
+    method_re = re.compile(
+        r'(?m)^[ \t]{0,4}(?:public|protected|private)\s+(?:static\s+)?function\s+\w+'
+    )
+    matches = list(method_re.finditer(raw))
+
+    if len(matches) < 2:
+        return [{"file": file, "raw": raw, "line": base_line}]
+
+    header = raw[:matches[0].start()].rstrip()
+    result = []
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        method_body = raw[start:end].strip()
+        method_line = base_line + raw[:start].count('\n')
+        full_block = f"{header}\n\n{method_body}" if header else method_body
+        result.append({"file": file, "raw": full_block, "line": method_line})
+
+    return result
+
+
 def extract_php_blocks(diff: str) -> list[dict]:
     """
-    Parse a unified diff and return a list of dicts with keys:
-      {"file": str, "line": int, "raw": str}
-    for PHP files only (.php extension). Only added lines (+ prefix) are
-    included. All added lines from the same PHP file are grouped into one block.
+    Parse a unified diff and return per-method blocks for PHP files.
+    Files with a single method (or no methods) are returned as one block.
     """
-    blocks: dict[str, dict] = {}
+    files: dict[str, dict] = {}
     current_file: str | None = None
     hunk_new_line: int = 0
 
@@ -109,7 +162,7 @@ def extract_php_blocks(diff: str) -> list[dict]:
             continue
 
         if raw_line.startswith('+') and not raw_line.startswith('+++'):
-            entry = blocks.setdefault(current_file, {
+            entry = files.setdefault(current_file, {
                 "file": current_file,
                 "line": hunk_new_line,
                 "raw_lines": [],
@@ -121,10 +174,11 @@ def extract_php_blocks(diff: str) -> list[dict]:
         else:
             hunk_new_line += 1
 
-    return [
-        {"file": e["file"], "line": e["line"], "raw": "\n".join(e["raw_lines"])}
-        for e in blocks.values()
-    ]
+    result = []
+    for entry in files.values():
+        raw = "\n".join(entry["raw_lines"])
+        result.extend(_split_into_method_blocks(entry["file"], raw, entry["line"]))
+    return result
 
 
 # ── Boost detection ───────────────────────────────────────────────────────────
@@ -164,10 +218,11 @@ def _write_boost_config(work_dir: str, artisan_path: str) -> str:
     return path
 
 
-def _call_claude_code(block: dict, config_path: str | None) -> list[dict]:
+def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[dict]:
     """
-    Call `claude -p <prompt> [--mcp-config ... --allowedTools ...]`.
+    Call `claude -p <prompt> --model <model> [--mcp-config ... --allowedTools ...]`.
     config_path=None means no Boost (LLM-only).
+    Token counts are estimated (~4 chars/token) since the CLI doesn't expose usage.
     """
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
@@ -177,7 +232,7 @@ def _call_claude_code(block: dict, config_path: str | None) -> list[dict]:
         "Return a JSON array of findings. Return [] if no issues."
     )
 
-    cmd = ["claude", "-p", prompt]
+    cmd = ["claude", "-p", prompt, "--model", model]
     if config_path is not None:
         cmd += ["--mcp-config", config_path, "--allowedTools", _MCP_TOOLS]
 
@@ -187,6 +242,8 @@ def _call_claude_code(block: dict, config_path: str | None) -> list[dict]:
             logger.warning("[ORM/claude-code] Exit %d for %s: %s",
                            proc.returncode, block["file"], proc.stderr[:300])
             return []
+        # Estimate tokens: ~4 chars per token (CLI doesn't expose usage)
+        _track_usage(model, len(prompt) // 4, len(proc.stdout) // 4)
         return _parse_json_response(proc.stdout)
     except subprocess.TimeoutExpired:
         logger.warning("[ORM/claude-code] Timed out for %s", block["file"])
@@ -254,6 +311,8 @@ async def _call_anthropic_with_boost(
                 ),
             }]
 
+            total_in = 0
+            total_out = 0
             for _ in range(10):  # max agentic turns
                 response = client.messages.create(
                     model=model,
@@ -262,8 +321,11 @@ async def _call_anthropic_with_boost(
                     messages=messages,
                     tools=tools,
                 )
+                total_in += response.usage.input_tokens
+                total_out += response.usage.output_tokens
 
                 if response.stop_reason == "end_turn":
+                    _track_usage(model, total_in, total_out)
                     for cb in response.content:
                         if hasattr(cb, "text"):
                             return _parse_json_response(cb.text)
@@ -298,6 +360,7 @@ async def _call_anthropic_with_boost(
                 else:
                     break
 
+            _track_usage(model, total_in, total_out)
     return []
 
 
@@ -319,6 +382,7 @@ async def _call_anthropic_no_boost(block: dict, api_key: str, model: str) -> lis
             ),
         }],
     )
+    _track_usage(model, response.usage.input_tokens, response.usage.output_tokens)
     for cb in response.content:
         if hasattr(cb, "text"):
             return _parse_json_response(cb.text)
@@ -340,7 +404,7 @@ def _call_block(
 ) -> list[dict]:
     try:
         if provider == "claude-code":
-            return _call_claude_code(block, config_path if use_boost else None)
+            return _call_claude_code(block, config_path if use_boost else None, model)
         else:
             if use_boost and artisan_path:
                 return asyncio.run(
@@ -398,7 +462,7 @@ def main() -> None:
 
     provider = os.environ.get("LLM_PROVIDER", "anthropic").lower()
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    model = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
+    model = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 
     if provider == "anthropic" and not api_key:
         logger.warning("[ORM] LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set — skipping analysis")
@@ -434,6 +498,7 @@ def main() -> None:
         blocks, provider, use_boost, artisan_path, config_path,
         api_key, model, args.output, db_env,
     )
+    _log_cost_summary(model)
 
 
 if __name__ == "__main__":
