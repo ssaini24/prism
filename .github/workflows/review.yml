@@ -10,6 +10,11 @@ on:
         required: false
         type: string
         default: "claude-code"
+      enable_static_analysis:
+        description: "Run the static analysis job (SQL pattern checks). Set to false to skip."
+        required: false
+        type: boolean
+        default: true
     secrets:
       ANTHROPIC_API_KEY:
         required: false
@@ -157,6 +162,7 @@ jobs:
   # ── Job 2: Static analysis (SQL + other code files) ──────────────────────
   static-analysis:
     name: Static Analysis
+    if: inputs.enable_static_analysis
     runs-on: ubuntu-latest
 
     steps:
