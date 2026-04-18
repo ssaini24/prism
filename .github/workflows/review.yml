@@ -6,10 +6,10 @@ on:
   workflow_call:
     inputs:
       llm_provider:
-        description: "LLM provider: 'anthropic' (default) or 'claude-code' (local claude binary)"
+        description: "LLM provider: 'claude-code' (default, uses local claude binary) or 'anthropic' (needs ANTHROPIC_API_KEY)"
         required: false
         type: string
-        default: "anthropic"
+        default: "claude-code"
     secrets:
       ANTHROPIC_API_KEY:
         required: false
@@ -79,6 +79,10 @@ jobs:
       - name: Install Prism Python dependencies
         run: pip install -r requirements.txt
         working-directory: prism-action
+
+      - name: Install Claude CLI
+        if: inputs.llm_provider == 'claude-code'
+        run: npm install -g @anthropic-ai/claude-code
 
       - name: Fetch PR diff
         run: |
