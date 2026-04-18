@@ -56,10 +56,22 @@ jobs:
       - name: Install target repo PHP dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
         working-directory: target-repo
+        env:
+          APP_KEY: base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
 
       - name: Install Laravel Boost
-        run: composer require laravel/boost --dev --no-interaction
+        run: |
+          composer require laravel/boost --dev --no-interaction
+          php artisan package:discover --ansi
         working-directory: target-repo
+        env:
+          APP_KEY: base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: testing
+          DB_USERNAME: root
+          DB_PASSWORD: secret
 
       - name: Run database migrations
         run: php artisan migrate --force
