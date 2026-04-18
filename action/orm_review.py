@@ -220,7 +220,9 @@ def _write_boost_config(work_dir: str, artisan_path: str) -> str:
 
 def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[dict]:
     """
-    Call `claude -p <prompt> --model <model> [--mcp-config ... --allowedTools ...]`.
+    Call `claude -p <prompt> [--mcp-config ... --allowedTools ...]`.
+    The CLI uses whatever model it is configured with; --model is not passed
+    because the CLI uses dated model IDs that differ from the API model names.
     config_path=None means no Boost (LLM-only).
     Token counts are estimated (~4 chars/token) since the CLI doesn't expose usage.
     """
@@ -232,7 +234,7 @@ def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[
         "Return a JSON array of findings. Return [] if no issues."
     )
 
-    cmd = ["claude", "-p", prompt, "--model", model]
+    cmd = ["claude", "-p", prompt]
     if config_path is not None:
         cmd += ["--mcp-config", config_path, "--allowedTools", _MCP_TOOLS]
 
@@ -240,7 +242,8 @@ def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             logger.warning("[ORM/claude-code] Exit %d for %s: %s",
-                           proc.returncode, block["file"], proc.stderr[:300])
+                           proc.returncode, block["file"],
+                           (proc.stderr or proc.stdout)[:300])
             return []
         # Estimate tokens: ~4 chars per token (CLI doesn't expose usage)
         _track_usage(model, len(prompt) // 4, len(proc.stdout) // 4)
