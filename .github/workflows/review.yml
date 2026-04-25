@@ -218,7 +218,7 @@ jobs:
   post-comments:
     name: Post Review Comments
     runs-on: ubuntu-latest
-    needs: [orm-analysis]
+    needs: [orm-analysis, static-analysis]
     if: always() && needs.orm-analysis.result != 'skipped'
 
     steps:
