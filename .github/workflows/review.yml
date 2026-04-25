@@ -220,9 +220,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [orm-analysis, static-analysis]
     if: always() && needs.orm-analysis.result != 'skipped'
-    permissions:
-      pull-requests: write
-      issues: write
 
     steps:
       - name: Checkout Prism repo
