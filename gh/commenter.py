@@ -68,13 +68,15 @@ class PRCommenter:
 
         def _post_one(query: ExtractedQuery, issue: Issue) -> None:
             nonlocal inline_count, skipped
+            # Use the per-issue line when the LLM provides it; fall back to the block start.
+            line = issue.line if issue.line > 0 else query.line
             body = _format_inline_issue(issue, result_map[id(query)])
             try:
                 posted = pr.create_review_comment(
                     body=body,
                     commit=commit,
                     path=query.file,
-                    line=query.line,
+                    line=line,
                     side="RIGHT",
                 )
                 pos = getattr(posted, "position", None)
@@ -100,7 +102,7 @@ class PRCommenter:
             except GithubException as exc:
                 logger.warning(
                     "Inline comment failed for %s:%d [%s] (status=%s): %s",
-                    query.file, query.line, issue.type, exc.status, exc.data,
+                    query.file, line, issue.type, exc.status, exc.data,
                 )
 
         # Build a map so the closure can look up the ReviewResult for each query
@@ -113,7 +115,8 @@ class PRCommenter:
             if not result.issues or query.line <= 0:
                 continue
             for issue in result.issues:
-                key = (query.file, query.line, issue.type)
+                line = issue.line if issue.line > 0 else query.line
+                key = (query.file, line, issue.type)
                 if key not in seen_issues:
                     seen_issues.add(key)
                     work.append((query, issue))
