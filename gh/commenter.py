@@ -10,7 +10,6 @@ from github import Github, GithubException
 from github.PullRequest import PullRequest
 
 from config import settings
-from gh.auth import get_github_client, get_token
 from models.review import ExtractedQuery, Issue, ReviewResult
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,8 @@ class PRCommenter:
         self._repo_full_name = ""
 
     def _gh(self, repo_full_name: str = "") -> Github:
-        return get_github_client(repo_full_name or self._repo_full_name)
+        """Return an authenticated Github client using the GitHub token from config."""
+        return Github(settings.github_token)
 
     def post_review(
         self,
