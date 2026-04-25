@@ -268,7 +268,7 @@ def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[
         cmd += ["--mcp-config", config_path, "--allowedTools", _MCP_TOOLS]
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             logger.warning("[ORM/claude-code] Exit %d for %s: %s",
                            proc.returncode, block["file"],
