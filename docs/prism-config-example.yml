@@ -1,0 +1,27 @@
+# .prism/config.yml — Prism reviewer configuration
+# Copy this file to .prism/config.yml in your repository.
+# All fields are optional. Omit any field to use the Prism default.
+
+# Paths to scan in PR diffs. Supports glob patterns:
+#   *  matches any path segment (no slashes)
+#   ** matches any number of path segments (including zero)
+#
+# Default: ["app/**", "database/migrations/"]
+#
+# Examples:
+#   app/**                  → all PHP files anywhere under app/
+#   app/**/Models           → app/Models/, app/Business/Models/, app/Payments/Models/, etc.
+#   app/Http/Controllers    → only the Controllers directory
+scan_paths:
+  - app/**/Repositories
+  - app/**/Services
+  - app/Http/Controllers
+  - database/migrations
+
+# Issue types to suppress. Matching issues are dropped before posting comments.
+# Valid values: select_star, missing_where_clause, function_on_indexed_column,
+#   join_without_condition, n_plus_one_pattern, destructive_ddl, unsafe_alter_table,
+#   full_table_scan, missing_index, inefficient_subquery, implicit_type_conversion,
+#   unbounded_result_set
+# Default: [] (all issues reported)
+disabled_rules: []
