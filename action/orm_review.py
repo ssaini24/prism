@@ -7,6 +7,10 @@ Provider selection via LLM_PROVIDER env var:
 """
 from __future__ import annotations
 
+import sys
+import os as _os
+sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import asyncio
 import json
@@ -15,6 +19,8 @@ import os
 import re
 import subprocess
 import tempfile
+
+from action.config_loader import load_config, PrismConfig  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,11 @@ def _log_cost_summary(model: str) -> None:
     logger.info("[ORM] ───────────────────────────────────────────────────")
 
 
+def _current_cost_usd(model: str) -> float:
+    cost_in, cost_out = _COST_PER_1K.get(model, (0.0, 0.0))
+    return (_usage["input_tokens"] / 1000 * cost_in) + (_usage["output_tokens"] / 1000 * cost_out)
+
+
 # ── diff parsing ──────────────────────────────────────────────────────────────
 
 
@@ -143,7 +154,7 @@ def _split_into_method_blocks(file: str, raw: str, base_line: int) -> list[dict]
     return result
 
 
-def extract_php_blocks(diff: str) -> list[dict]:
+def extract_php_blocks(diff: str, prism_config: "PrismConfig | None" = None) -> list[dict]:
     """
     Parse a unified diff and return per-method blocks for PHP files.
     Files with a single method (or no methods) are returned as one block.
@@ -156,7 +167,16 @@ def extract_php_blocks(diff: str) -> list[dict]:
         file_match = re.match(r'^\+\+\+\s+b/(.+)$', raw_line)
         if file_match:
             path = file_match.group(1)
-            current_file = path if path.endswith('.php') else None
+            if not path.endswith('.php'):
+                current_file = None
+                hunk_new_line = 0
+                continue
+            if prism_config and not prism_config.should_scan(path):
+                logger.debug("[ORM] Skipping %s (not in scan_paths)", path)
+                current_file = None
+                hunk_new_line = 0
+                continue
+            current_file = path
             hunk_new_line = 0
             continue
 
@@ -439,6 +459,8 @@ def review_blocks(
     model: str,
     output_path: str,
     db_env: dict,
+    prism_config: PrismConfig,
+    cost_threshold_usd: float,
 ) -> None:
     if not blocks:
         with open(output_path, "w") as fh:
@@ -447,9 +469,27 @@ def review_blocks(
 
     artifacts = []
     for block in blocks:
+        # Cost threshold guard
+        running_cost = _current_cost_usd(model)
+        if running_cost > cost_threshold_usd:
+            logger.warning(
+                "[ORM] Cost threshold $%.4f exceeded ($%.4f so far) — stopping after %d/%d blocks",
+                cost_threshold_usd, running_cost, len(artifacts), len(blocks),
+            )
+            break
+
         llm_results = _call_block(
             block, provider, use_boost, artisan_path, config_path, api_key, model, db_env
         )
+
+        # Filter disabled rules from results
+        for item in llm_results:
+            if "issues" in item:
+                item["issues"] = [
+                    issue for issue in item["issues"]
+                    if not prism_config.is_rule_disabled(issue.get("type", ""))
+                ]
+
         result = llm_results[0] if llm_results else {}
         artifacts.append({
             "query": {
@@ -484,11 +524,16 @@ def main() -> None:
 
     db_env = {k: os.environ[k] for k in _DB_ENV_KEYS if k in os.environ}
 
+    prism_config = load_config(args.laravel_path)
+    cost_threshold_usd = float(os.environ.get("COST_THRESHOLD_USD", "1.00"))
+
     with open(args.diff) as fh:
         diff_text = fh.read()
 
-    blocks = extract_php_blocks(diff_text)
-    logger.info("[ORM] Extracted %d PHP block(s) from diff", len(blocks))
+    blocks = extract_php_blocks(diff_text, prism_config=prism_config)
+    logger.info("[ORM] Extracted %d PHP block(s) from diff (scan_paths=%s)",
+                len(blocks), prism_config.scan_paths)
+    logger.info("[ORM] Cost threshold: $%.2f", cost_threshold_usd)
 
     use_boost = False
     artisan_path = None
@@ -509,6 +554,7 @@ def main() -> None:
     review_blocks(
         blocks, provider, use_boost, artisan_path, config_path,
         api_key, model, args.output, db_env,
+        prism_config=prism_config, cost_threshold_usd=cost_threshold_usd,
     )
     _log_cost_summary(model)
 

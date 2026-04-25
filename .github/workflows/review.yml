@@ -142,6 +142,7 @@ jobs:
           LLM_PROVIDER: ${{ inputs.llm_provider }}
           LLM_MODEL: claude-sonnet-4-6
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          COST_THRESHOLD_USD: "1.00"
           APP_ENV: local
           APP_KEY: base64:dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
           DB_CONNECTION: mysql
