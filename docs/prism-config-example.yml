@@ -6,7 +6,7 @@
 #   *  matches any path segment (no slashes)
 #   ** matches any number of path segments (including zero)
 #
-# Default: ["app/**", "database/migrations/"]
+# Default: ["app/**", "database/migrations"]
 #
 # Examples:
 #   app/**                  → all PHP files anywhere under app/

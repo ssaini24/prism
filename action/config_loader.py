@@ -4,7 +4,7 @@ If the file is absent or malformed, all fields fall back to safe defaults.
 Repo admins control behaviour by committing .prism/config.yml to their repo.
 
 Supported keys:
-  scan_paths     - list of path glob patterns (** supported); default: ["app/**", "database/migrations/"]
+  scan_paths     - list of path glob patterns (** supported); default: ["app/**", "database/migrations"]
   disabled_rules - list of issue type strings to suppress; default: []
 
 NOT repo-configurable (Prism repo controls these):
@@ -22,7 +22,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _DEFAULTS: dict = {
-    "scan_paths": ["app/**", "database/migrations/"],
+    "scan_paths": ["app/**", "database/migrations"],
     "disabled_rules": [],
 }
 
@@ -101,10 +101,19 @@ def load_config(laravel_path: str | None) -> PrismConfig:
                     logger.warning("[Config] Unknown keys in .prism/config.yml: %s — ignored", unknown)
 
                 for key in _VALID_KEYS:
-                    if key in repo_config and repo_config[key] is not None:
-                        merged[key] = repo_config[key]
+                    if key not in repo_config or repo_config[key] is None:
+                        continue
+                    val = repo_config[key]
+                    if key == "scan_paths" and not isinstance(val, list):
+                        logger.warning("[Config] 'scan_paths' must be a list — ignored")
+                        continue
+                    if key == "disabled_rules" and not isinstance(val, list):
+                        logger.warning("[Config] 'disabled_rules' must be a list — ignored")
+                        continue
+                    merged[key] = val
 
-                logger.info("[Config] Loaded .prism/config.yml — scan_paths=%s", merged["scan_paths"])
+                logger.info("[Config] Loaded .prism/config.yml — scan_paths=%s disabled_rules=%s",
+                            merged["scan_paths"], merged["disabled_rules"])
             except yaml.YAMLError as exc:
                 logger.warning("[Config] Malformed .prism/config.yml: %s — using defaults", exc)
             except OSError as exc:
