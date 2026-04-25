@@ -59,7 +59,7 @@ class DBQueryReviewer(BaseReviewer):
             logger.warning("[LLM Review] Failed, using static-only results: %s", exc)
             result = _build_static_only_result(static_issues)
 
-        return _apply_feedback(result, query.file, self._repo)
+        return result
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -71,18 +71,9 @@ class DBQueryReviewer(BaseReviewer):
         schema_context: str,
         static_issues: list[Issue],
     ) -> ReviewResult:
-        from config import settings
-        from core.db_explainer import explain_via_mcp
-
-        explain_result = None
-        if settings.enable_db_analysis_via_mcp:
-            result = explain_via_mcp(query)
-            if result and result.has_issues():
-                explain_result = result.to_dict()
-
         static_dicts = [i.model_dump() for i in static_issues]
         user_prompt = prompts.build_user_prompt(
-            query, schema_context, static_dicts, explain_result
+            query, schema_context, static_dicts, None
         )
 
         raw = self._llm.complete_json(
@@ -98,40 +89,6 @@ class DBQueryReviewer(BaseReviewer):
 # ---------------------------------------------------------------------------
 
 
-_SEVERITY_ORDER = ["low", "medium", "high"]
-
-
-def _apply_feedback(result: ReviewResult, file_path: str, repo: str) -> ReviewResult:
-    """Adjust issue severity and add team feedback labels based on stored signals."""
-    from core.feedback_store import get_adjustment
-
-    adjusted = []
-    for issue in result.issues:
-        adj = get_adjustment(issue.type, repo, file_path)
-
-        if adj.get("skip"):
-            continue
-
-        if adj["net_signal"] == 0 and not adj["label"]:
-            adjusted.append(issue)
-            continue
-
-        new_severity = issue.severity
-        if adj["severity_delta"] < 0:
-            idx = _SEVERITY_ORDER.index(issue.severity) if issue.severity in _SEVERITY_ORDER else 1
-            new_severity = _SEVERITY_ORDER[max(0, idx - 1)]
-
-        new_description = issue.description
-        if adj["label"]:
-            new_description = f"{issue.description}\n\n{adj['label']}"
-
-        adjusted.append(issue.model_copy(update={
-            "severity": new_severity,
-            "description": new_description,
-        }))
-
-
-    return result.model_copy(update={"issues": adjusted})
 
 
 def _parse_llm_response(data: dict, static_issues: list[Issue]) -> ReviewResult:
