@@ -29,3 +29,9 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime data (generated at startup, team-specific)
+data/feedback.db
+
+# Git worktrees
+.worktrees/

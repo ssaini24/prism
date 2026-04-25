@@ -1,39 +1,32 @@
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
+class Settings:
     # GitHub — personal token (fallback) or App credentials (preferred)
-    github_webhook_secret: str = ""
-    github_token: str = ""          # PAT — used only if App credentials are not set
-    github_app_id: int = 0          # GitHub App ID
-    github_app_private_key: str = ""  # Contents of the .pem file (newlines as \n)
+    github_webhook_secret: str = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+    github_token: str = os.environ.get("GITHUB_TOKEN", "")  # PAT — used only if App credentials are not set
+    github_app_id: int = int(os.environ.get("GITHUB_APP_ID", "0"))  # GitHub App ID
+    github_app_private_key: str = os.environ.get("GITHUB_APP_PRIVATE_KEY", "")  # Contents of the .pem file (newlines as \n)
 
-    # LLM — set LLM_PROVIDER to "openai" or "anthropic"
-    llm_provider: str = "openai"
-    llm_model: str = "gpt-4o-mini"
-    llm_max_tokens: int = 2048
+    # LLM — set LLM_PROVIDER to "claude-code" or "anthropic"
+    llm_provider: str = os.environ.get("LLM_PROVIDER", "claude-code")
+    llm_model: str = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+    llm_max_tokens: int = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
 
     # Provider credentials (only the one matching LLM_PROVIDER is required)
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
+    openai_api_key: str = os.environ.get("OPENAI_API_KEY", "")
+    anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
 
     # Feature flags
-    enable_code_review: bool = False
-    enable_orm_review: bool = False
-    enable_db_analysis_via_mcp: bool = False
+    enable_code_review: bool = os.environ.get("ENABLE_CODE_REVIEW", "false").lower() == "true"
+    enable_orm_review: bool = os.environ.get("ENABLE_ORM_REVIEW", "false").lower() == "true"
+    enable_db_analysis_via_mcp: bool = os.environ.get("ENABLE_DB_ANALYSIS_VIA_MCP", "false").lower() == "true"
 
     # App
-    log_level: str = "INFO"
-    environment: str = "development"
+    log_level: str = os.environ.get("LOG_LEVEL", "INFO")
+    environment: str = os.environ.get("ENVIRONMENT", "development")
 
 
 settings = Settings()
