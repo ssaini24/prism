@@ -202,9 +202,6 @@ jobs:
           LLM_PROVIDER: ${{ inputs.llm_provider }}
           LLM_MODEL: claude-haiku-4-5-20251001
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ENABLE_ORM_REVIEW: "false"
-          ENABLE_CODE_REVIEW: "false"
-          ENABLE_DB_ANALYSIS_VIA_MCP: "false"
 
       - name: Upload static results
         if: always()

@@ -19,11 +19,6 @@ class Settings:
     openai_api_key: str = os.environ.get("OPENAI_API_KEY", "")
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
 
-    # Feature flags
-    enable_code_review: bool = os.environ.get("ENABLE_CODE_REVIEW", "false").lower() == "true"
-    enable_orm_review: bool = os.environ.get("ENABLE_ORM_REVIEW", "false").lower() == "true"
-    enable_db_analysis_via_mcp: bool = os.environ.get("ENABLE_DB_ANALYSIS_VIA_MCP", "false").lower() == "true"
-
     # App
     log_level: str = os.environ.get("LOG_LEVEL", "INFO")
     environment: str = os.environ.get("ENVIRONMENT", "development")
