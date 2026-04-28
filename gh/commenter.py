@@ -66,51 +66,69 @@ class PRCommenter:
         resolved_keys: set[tuple[str, int, str]] = set()
         lock = threading.Lock()
 
-        def _post_one(query: ExtractedQuery, issue: Issue) -> None:
+        def _post_one(query: ExtractedQuery, issue: Issue, primary: bool = False) -> None:
             nonlocal inline_count, skipped
-            # Use the per-issue line when the LLM provides it; fall back to the block start.
-            line = issue.line if issue.line > 0 else query.line
-            body = _format_inline_issue(issue, result_map[id(query)])
-            try:
-                posted = pr.create_review_comment(
-                    body=body,
-                    commit=commit,
-                    path=query.file,
-                    line=line,
-                    side="RIGHT",
-                )
-                pos = getattr(posted, "position", None)
-                with lock:
-                    if pos is not None:
-                        new_key = (query.file, pos, issue.type)
-                        if new_key in existing_keys:
-                            try:
-                                posted.delete()
-                                skipped += 1
-                                logger.debug(
-                                    "Skipped duplicate comment: %s pos=%d [%s]",
-                                    query.file, pos, issue.type,
-                                )
-                            except GithubException:
-                                pass
-                            resolved_keys.add(new_key)
+            # Try the per-issue line first (more precise); fall back to the block-start
+            # line (always a valid diff line) when GitHub rejects the specific line.
+            candidates = []
+            if issue.line > 0 and issue.line != query.line:
+                candidates.append(issue.line)
+            candidates.append(query.line)
+
+            body = _format_inline_issue(issue, result_map[id(query)], primary=primary)
+            for line in candidates:
+                try:
+                    posted = pr.create_review_comment(
+                        body=body,
+                        commit=commit,
+                        path=query.file,
+                        line=line,
+                        side="RIGHT",
+                    )
+                    pos = getattr(posted, "position", None)
+                    with lock:
+                        if pos is not None:
+                            new_key = (query.file, pos, issue.type)
+                            if new_key in existing_keys:
+                                try:
+                                    posted.delete()
+                                    skipped += 1
+                                    logger.debug(
+                                        "Skipped duplicate comment: %s pos=%d [%s]",
+                                        query.file, pos, issue.type,
+                                    )
+                                except GithubException:
+                                    pass
+                                resolved_keys.add(new_key)
+                            else:
+                                inline_count += 1
+                                resolved_keys.add(new_key)
                         else:
                             inline_count += 1
-                            resolved_keys.add(new_key)
-                    else:
-                        inline_count += 1
-            except GithubException as exc:
-                logger.warning(
-                    "Inline comment failed for %s:%d [%s] (status=%s): %s",
-                    query.file, line, issue.type, exc.status, exc.data,
-                )
+                    return  # posted successfully
+                except GithubException as exc:
+                    if exc.status == 422 and line != candidates[-1]:
+                        logger.debug(
+                            "Line %d not in diff for %s [%s], retrying with block line %d",
+                            line, query.file, issue.type, candidates[-1],
+                        )
+                        continue
+                    logger.warning(
+                        "Inline comment failed for %s:%d [%s] (status=%s): %s",
+                        query.file, line, issue.type, exc.status, exc.data,
+                    )
+                    return
 
         # Build a map so the closure can look up the ReviewResult for each query
         result_map = {id(query): result for query, result in results}
 
-        # Deduplicate across pipelines — same (file, line, issue_type) from multiple reviewers
+        # Deduplicate across pipelines — same (file, line, issue_type) from multiple reviewers.
+        # Mark the most-severe issue per block as primary so block-level findings
+        # (optimized query, index suggestions) appear exactly once.
+        _sev_rank = {"high": 2, "medium": 1, "low": 0}
         seen_issues: set[tuple[str, int, str]] = set()
-        work = []
+        primary_per_block: dict[int, Issue] = {}  # id(query) → primary issue
+        work: list[tuple[ExtractedQuery, Issue]] = []
         for query, result in results:
             if not result.issues or query.line <= 0:
                 continue
@@ -120,8 +138,15 @@ class PRCommenter:
                 if key not in seen_issues:
                     seen_issues.add(key)
                     work.append((query, issue))
+                    # Track highest-severity issue per block
+                    current = primary_per_block.get(id(query))
+                    if current is None or _sev_rank.get(issue.severity, 0) > _sev_rank.get(current.severity, 0):
+                        primary_per_block[id(query)] = issue
         with ThreadPoolExecutor(max_workers=max(1, min(len(work), 6))) as executor:
-            futures = [executor.submit(_post_one, query, issue) for query, issue in work]
+            futures = [
+                executor.submit(_post_one, query, issue, issue is primary_per_block.get(id(query)))
+                for query, issue in work
+            ]
             for future in as_completed(futures):
                 future.result()  # re-raise any unexpected exceptions
 
@@ -189,7 +214,13 @@ _QUERY_PERF_TYPES = {
 }
 
 
-def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
+def _format_inline_issue(issue: Issue, result: ReviewResult, primary: bool = False) -> str:
+    """Format a single issue as a comment body.
+
+    primary=True means this is the most-severe issue for its block — block-level
+    findings (optimized query, index suggestions) are only shown on the primary issue
+    to avoid repeating them across every comment for the same code block.
+    """
     emoji = _SEVERITY_EMOJI.get(issue.severity, "⚪")
     confidence = _CONFIDENCE_LABEL.get(issue.confidence, issue.confidence)
     lines = [
@@ -199,20 +230,21 @@ def _format_inline_issue(issue: Issue, result: ReviewResult) -> str:
         "",
         f"**Suggestion:** {issue.suggestion}",
     ]
-    # Only show optimized query for performance-related issues
-    if result.optimized_query and issue.type in _QUERY_PERF_TYPES:
-        lines += [
-            "",
-            "**Optimized query:**",
-            f"```sql\n{result.optimized_query}\n```",
-        ]
-    # Only show index suggestions for issues where an index would actually help
-    if result.index_suggestions and issue.type in _INDEX_RELEVANT_TYPES:
-        lines += ["", "**Index suggestions:**"]
-        for s in result.index_suggestions:
-            lines.append(f"```sql\n{s}\n```")
-    if result.cost_analysis and result.cost_analysis.basis == "explain":
-        lines += ["", "> 📊 _Analysis backed by live schema data via Laravel Boost MCP._"]
+    if primary:
+        # Only show optimized query for performance-related issues
+        if result.optimized_query and issue.type in _QUERY_PERF_TYPES:
+            lines += [
+                "",
+                "**Optimized query:**",
+                f"```sql\n{result.optimized_query}\n```",
+            ]
+        # Only show index suggestions for issues where an index would actually help
+        if result.index_suggestions and issue.type in _INDEX_RELEVANT_TYPES:
+            lines += ["", "**Index suggestions:**"]
+            for s in result.index_suggestions:
+                lines.append(f"```sql\n{s}\n```")
+        if result.cost_analysis and result.cost_analysis.basis == "explain":
+            lines += ["", "> 📊 _Analysis backed by live schema data via Laravel Boost MCP._"]
     return "\n".join(lines)
 
 
