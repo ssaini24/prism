@@ -10,7 +10,7 @@ from github import Github, GithubException
 from github.PullRequest import PullRequest
 
 from config import settings
-from models.review import ExtractedQuery, Issue, ReviewResult
+from models.review import ExtractedQuery, Issue, ReviewResult  # ReviewResult used in post_review signature
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class PRCommenter:
         resolved_keys: set[tuple[str, int, str]] = set()
         lock = threading.Lock()
 
-        def _post_one(query: ExtractedQuery, issue: Issue, primary: bool = False) -> None:
+        def _post_one(query: ExtractedQuery, issue: Issue) -> None:
             nonlocal inline_count, skipped
             # Try the per-issue line first (more precise); fall back to the block-start
             # line (always a valid diff line) when GitHub rejects the specific line.
@@ -75,7 +75,7 @@ class PRCommenter:
                 candidates.append(issue.line)
             candidates.append(query.line)
 
-            body = _format_inline_issue(issue, result_map[id(query)], primary=primary)
+            body = _format_inline_issue(issue)
             for line in candidates:
                 try:
                     posted = pr.create_review_comment(
@@ -122,13 +122,10 @@ class PRCommenter:
         # Build a map so the closure can look up the ReviewResult for each query
         result_map = {id(query): result for query, result in results}
 
-        # Deduplicate across pipelines — same (file, line, issue_type) from multiple reviewers.
-        # Mark the most-severe issue per block as primary so block-level findings
-        # (optimized query, index suggestions) appear exactly once.
+        # Deduplicate across pipelines, then cap at 2 issues per block (highest severity first).
         _sev_rank = {"high": 2, "medium": 1, "low": 0}
         seen_issues: set[tuple[str, int, str]] = set()
-        primary_per_block: dict[int, Issue] = {}  # id(query) → primary issue
-        work: list[tuple[ExtractedQuery, Issue]] = []
+        issues_per_block: dict[int, list[tuple[ExtractedQuery, Issue]]] = {}
         for query, result in results:
             if not result.issues or query.line <= 0:
                 continue
@@ -137,16 +134,16 @@ class PRCommenter:
                 key = (query.file, line, issue.type)
                 if key not in seen_issues:
                     seen_issues.add(key)
-                    work.append((query, issue))
-                    # Track highest-severity issue per block
-                    current = primary_per_block.get(id(query))
-                    if current is None or _sev_rank.get(issue.severity, 0) > _sev_rank.get(current.severity, 0):
-                        primary_per_block[id(query)] = issue
+                    issues_per_block.setdefault(id(query), []).append((query, issue))
+
+        work: list[tuple[ExtractedQuery, Issue]] = []
+        for block_issues in issues_per_block.values():
+            # Sort by severity descending, take top 2
+            top2 = sorted(block_issues, key=lambda qi: _sev_rank.get(qi[1].severity, 0), reverse=True)[:2]
+            work.extend(top2)
+
         with ThreadPoolExecutor(max_workers=max(1, min(len(work), 6))) as executor:
-            futures = [
-                executor.submit(_post_one, query, issue, issue is primary_per_block.get(id(query)))
-                for query, issue in work
-            ]
+            futures = [executor.submit(_post_one, query, issue) for query, issue in work]
             for future in as_completed(futures):
                 future.result()  # re-raise any unexpected exceptions
 
@@ -202,50 +199,17 @@ def _comment_key(comment) -> tuple[str, int, str] | None:
     return (comment.path, pos, match.group(1))
 
 
-_INDEX_RELEVANT_TYPES = {
-    "full_table_scan", "missing_index", "function_on_indexed_column",
-    "inefficient_subquery", "n_plus_one_pattern",
-}
-
-_QUERY_PERF_TYPES = {
-    "full_table_scan", "missing_index", "select_star", "function_on_indexed_column",
-    "join_without_condition", "n_plus_one_pattern", "inefficient_subquery",
-    "implicit_type_conversion", "unbounded_result_set",
-}
-
-
-def _format_inline_issue(issue: Issue, result: ReviewResult, primary: bool = False) -> str:
-    """Format a single issue as a comment body.
-
-    primary=True means this is the most-severe issue for its block — block-level
-    findings (optimized query, index suggestions) are only shown on the primary issue
-    to avoid repeating them across every comment for the same code block.
-    """
+def _format_inline_issue(issue: Issue) -> str:
+    """Format a single issue as a concise inline comment: severity + description + suggestion."""
     emoji = _SEVERITY_EMOJI.get(issue.severity, "⚪")
     confidence = _CONFIDENCE_LABEL.get(issue.confidence, issue.confidence)
-    lines = [
+    return "\n".join([
         f"{emoji} **[{issue.type}]** _{confidence}_",
         "",
         issue.description,
         "",
         f"**Suggestion:** {issue.suggestion}",
-    ]
-    if primary:
-        # Only show optimized query for performance-related issues
-        if result.optimized_query and issue.type in _QUERY_PERF_TYPES:
-            lines += [
-                "",
-                "**Optimized query:**",
-                f"```sql\n{result.optimized_query}\n```",
-            ]
-        # Only show index suggestions for issues where an index would actually help
-        if result.index_suggestions and issue.type in _INDEX_RELEVANT_TYPES:
-            lines += ["", "**Index suggestions:**"]
-            for s in result.index_suggestions:
-                lines.append(f"```sql\n{s}\n```")
-        if result.cost_analysis and result.cost_analysis.basis == "explain":
-            lines += ["", "> 📊 _Analysis backed by live schema data via Laravel Boost MCP._"]
-    return "\n".join(lines)
+    ])
 
 
 def _clean_comment() -> str:
