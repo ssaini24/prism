@@ -126,88 +126,104 @@ def _current_cost_usd(model: str) -> float:
 # ── diff parsing ──────────────────────────────────────────────────────────────
 
 
-def _split_into_method_blocks(file: str, raw: str, base_line: int) -> list[dict]:
-    """
-    Split a PHP file's added content into per-method blocks.
-    Each block is prepended with the file header (namespace, imports, class
-    declaration) so the LLM has full context for every method.
-    Falls back to a single block when fewer than 2 methods are found.
-    """
-    method_re = re.compile(
-        r'(?m)^[ \t]{0,4}(?:public|protected|private)\s+(?:static\s+)?function\s+\w+'
+def _is_trivial_hunk(added_lines: list[str]) -> bool:
+    """Return True if every added line is an import, blank line, or docblock — nothing worth reviewing."""
+    for line in added_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('use '):
+            continue
+        if stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/**') or stripped == '*/':
+            continue
+        return False
+    return True
+
+
+def _flush_hunk(hunk: "dict | None", blocks: list) -> None:
+    """Finalise the current hunk and append a block if it contains reviewable code."""
+    if hunk is None or not hunk["lines"]:
+        return
+    added_lines = [content for (_ln, content, is_added) in hunk["lines"] if is_added]
+    if not added_lines or _is_trivial_hunk(added_lines):
+        return
+    raw = "\n".join(content for (_ln, content, _added) in hunk["lines"])
+    first_added = next(
+        (ln for ln, _content, is_added in hunk["lines"] if is_added),
+        hunk["hunk_start"],
     )
-    matches = list(method_re.finditer(raw))
-
-    if len(matches) < 2:
-        return [{"file": file, "raw": raw, "line": base_line}]
-
-    header = raw[:matches[0].start()].rstrip()
-    result = []
-    for i, match in enumerate(matches):
-        start = match.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-        method_body = raw[start:end].strip()
-        method_line = base_line + raw[:start].count('\n')
-        full_block = f"{header}\n\n{method_body}" if header else method_body
-        result.append({"file": file, "raw": full_block, "line": method_line})
-
-    return result
+    blocks.append({
+        "file": hunk["file"],
+        "raw": raw,
+        "line": first_added,            # fallback comment anchor — a + line in the diff
+        "hunk_start": hunk["hunk_start"],  # absolute line where the hunk begins (for LLM prompt)
+    })
 
 
 def extract_php_blocks(diff: str, prism_config: "PrismConfig | None" = None) -> list[dict]:
     """
-    Parse a unified diff and return per-method blocks for PHP files.
-    Files with a single method (or no methods) are returned as one block.
+    Parse a unified diff and return one block per hunk for PHP files.
+
+    Each block includes context lines alongside added lines so the LLM has
+    full structural context (method signatures, class declarations, etc.).
+    Trivial hunks that only add imports, blank lines, or docblocks are skipped.
     """
-    files: dict[str, dict] = {}
+    blocks: list[dict] = []
     current_file: str | None = None
-    hunk_new_line: int = 0
+    current_hunk: "dict | None" = None
 
     for raw_line in diff.splitlines():
+        # ── new file header ───────────────────────────────────────────────────
         file_match = re.match(r'^\+\+\+\s+b/(.+)$', raw_line)
         if file_match:
+            _flush_hunk(current_hunk, blocks)
+            current_hunk = None
             path = file_match.group(1)
             if not path.endswith('.php'):
                 current_file = None
-                hunk_new_line = 0
                 continue
             if prism_config and not prism_config.should_scan(path):
                 logger.debug("[ORM] Skipping %s (not in scan_paths)", path)
                 current_file = None
-                hunk_new_line = 0
                 continue
             current_file = path
-            hunk_new_line = 0
             continue
 
+        # ── hunk header ───────────────────────────────────────────────────────
         hunk_match = re.match(r'^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@', raw_line)
         if hunk_match:
-            hunk_new_line = int(hunk_match.group(1))
-            continue
-
-        if current_file is None:
-            if not raw_line.startswith('-'):
-                hunk_new_line += 1
-            continue
-
-        if raw_line.startswith('+') and not raw_line.startswith('+++'):
-            entry = files.setdefault(current_file, {
+            _flush_hunk(current_hunk, blocks)
+            current_hunk = None
+            if current_file is None:
+                continue
+            hunk_start = int(hunk_match.group(1))
+            current_hunk = {
                 "file": current_file,
-                "line": hunk_new_line,
-                "raw_lines": [],
-            })
-            entry["raw_lines"].append(raw_line[1:])
-            hunk_new_line += 1
-        elif raw_line.startswith('-') and not raw_line.startswith('---'):
-            pass
-        else:
-            hunk_new_line += 1
+                "hunk_start": hunk_start,
+                "current_line": hunk_start,
+                "lines": [],  # list of (line_no: int, content: str, is_added: bool)
+            }
+            continue
 
-    result = []
-    for entry in files.values():
-        raw = "\n".join(entry["raw_lines"])
-        result.extend(_split_into_method_blocks(entry["file"], raw, entry["line"]))
-    return result
+        if current_hunk is None:
+            continue
+
+        # ── diff body ─────────────────────────────────────────────────────────
+        if raw_line.startswith('+') and not raw_line.startswith('+++'):
+            ln = current_hunk["current_line"]
+            current_hunk["lines"].append((ln, raw_line[1:], True))
+            current_hunk["current_line"] += 1
+        elif raw_line.startswith('-') and not raw_line.startswith('---'):
+            pass  # removed lines: don't add to block, don't advance new-side counter
+        else:
+            # context line (starts with ' ' or bare newline)
+            ln = current_hunk["current_line"]
+            content = raw_line[1:] if raw_line.startswith(' ') else raw_line
+            current_hunk["lines"].append((ln, content, False))
+            current_hunk["current_line"] += 1
+
+    _flush_hunk(current_hunk, blocks)
+    return blocks
 
 
 # ── Boost detection ───────────────────────────────────────────────────────────
@@ -255,10 +271,11 @@ def _call_claude_code(block: dict, config_path: str | None, model: str) -> list[
     config_path=None means no Boost (LLM-only).
     Token counts are estimated (~4 chars/token) since the CLI doesn't expose usage.
     """
+    block_start = block.get("hunk_start", block["line"])
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         f"Review the following PHP/Eloquent code from `{block['file']}` "
-        f"(line {block['line']}):\n\n"
+        f"(starts at file line {block_start}):\n\n"
         f"```php\n{block['raw']}\n```\n\n"
         "Return a JSON array of findings. Return [] if no issues."
     )
@@ -334,11 +351,12 @@ async def _call_anthropic_with_boost(
                 for t in mcp_tools
             ]
 
+            block_start = block.get("hunk_start", block["line"])
             messages: list[dict] = [{
                 "role": "user",
                 "content": (
                     f"Review this PHP/Eloquent code from `{block['file']}` "
-                    f"(line {block['line']}):\n\n```php\n{block['raw']}\n```\n\n"
+                    f"(starts at file line {block_start}):\n\n```php\n{block['raw']}\n```\n\n"
                     "Return a JSON array of findings as described. Return [] if no issues."
                 ),
             }]
@@ -401,6 +419,7 @@ async def _call_anthropic_no_boost(block: dict, api_key: str, model: str) -> lis
     import anthropic as sdk
 
     client = sdk.Anthropic(api_key=api_key)
+    block_start = block.get("hunk_start", block["line"])
     response = client.messages.create(
         model=model,
         max_tokens=2048,
@@ -409,7 +428,7 @@ async def _call_anthropic_no_boost(block: dict, api_key: str, model: str) -> lis
             "role": "user",
             "content": (
                 f"Review this PHP/Eloquent code from `{block['file']}` "
-                f"(line {block['line']}):\n\n```php\n{block['raw']}\n```\n\n"
+                f"(starts at file line {block_start}):\n\n```php\n{block['raw']}\n```\n\n"
                 "Return a JSON array of findings as described. Return [] if no issues."
             ),
         }],
