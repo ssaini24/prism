@@ -547,9 +547,9 @@ def review_blocks(
 
     artifacts = []
     for block in blocks:
-        # Cost threshold guard
+        # Cost threshold guard. Use >= so threshold=0 prevents all LLM calls.
         running_cost = _current_cost_usd(model)
-        if running_cost > cost_threshold_usd:
+        if running_cost >= cost_threshold_usd:
             logger.warning(
                 "[ORM] Cost threshold $%.4f exceeded ($%.4f so far) — stopping after %d/%d blocks",
                 cost_threshold_usd, running_cost, len(artifacts), len(blocks),
