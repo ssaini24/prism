@@ -140,40 +140,99 @@ def _is_trivial_hunk(added_lines: list[str]) -> bool:
     return True
 
 
+_METHOD_RE = re.compile(
+    r'(?:public|protected|private)\s+(?:static\s+)?function\s+\w+'
+)
+
+
+def _split_by_method(hunk: dict) -> list[dict]:
+    """
+    Split a hunk's lines into one block per PHP method.
+
+    Each block contains only that method's lines (from its signature to the start
+    of the next method), so the LLM is given a focused, well-anchored snippet.
+    Falls back to a single block for the whole hunk when fewer than 2 methods exist.
+    """
+    lines = hunk["lines"]  # list of (line_no, content, is_added)
+
+    method_starts = [
+        i for i, (_ln, content, _added) in enumerate(lines)
+        if _METHOD_RE.search(content)
+    ]
+
+    def _make_block(method_lines: list) -> "dict | None":
+        added = [c for (_ln, c, a) in method_lines if a]
+        if not added or _is_trivial_hunk(added):
+            return None
+        raw = "\n".join(c for (_ln, c, _a) in method_lines)
+        method_sig_line = method_lines[0][0]  # file line number of the method signature
+        first_added = next((ln for ln, _c, a in method_lines if a), method_sig_line)
+        return {
+            "file": hunk["file"],
+            "raw": raw,
+            "line": first_added,          # fallback comment anchor — a + line in the diff
+            "hunk_start": method_sig_line, # tells LLM where this method starts in the file
+        }
+
+    if len(method_starts) < 2:
+        # Zero or one method: return the whole hunk as a single block
+        added = [c for (_ln, c, a) in lines if a]
+        if not added or _is_trivial_hunk(added):
+            return []
+        first_added = next((ln for ln, _c, a in lines if a), hunk["hunk_start"])
+        return [{
+            "file": hunk["file"],
+            "raw": "\n".join(c for (_ln, c, _a) in lines),
+            "line": first_added,
+            "hunk_start": hunk["hunk_start"],
+        }]
+
+    result = []
+    for i, start_idx in enumerate(method_starts):
+        end_idx = method_starts[i + 1] if i + 1 < len(method_starts) else len(lines)
+        block = _make_block(lines[start_idx:end_idx])
+        if block:
+            result.append(block)
+
+    return result or [{
+        "file": hunk["file"],
+        "raw": "\n".join(c for (_ln, c, _a) in lines),
+        "line": next((ln for ln, _c, a in lines if a), hunk["hunk_start"]),
+        "hunk_start": hunk["hunk_start"],
+    }]
+
+
 def _flush_hunk(hunk: "dict | None", blocks: list) -> None:
-    """Finalise the current hunk and append a block if it contains reviewable code."""
+    """Finalise the current hunk and extend blocks with per-method splits."""
     if hunk is None or not hunk["lines"]:
         return
-    added_lines = [content for (_ln, content, is_added) in hunk["lines"] if is_added]
+    added_lines = [c for (_ln, c, a) in hunk["lines"] if a]
     if not added_lines or _is_trivial_hunk(added_lines):
         return
-    raw = "\n".join(content for (_ln, content, _added) in hunk["lines"])
-    first_added = next(
-        (ln for ln, _content, is_added in hunk["lines"] if is_added),
-        hunk["hunk_start"],
-    )
-    blocks.append({
-        "file": hunk["file"],
-        "raw": raw,
-        "line": first_added,            # fallback comment anchor — a + line in the diff
-        "hunk_start": hunk["hunk_start"],  # absolute line where the hunk begins (for LLM prompt)
-    })
+    blocks.extend(_split_by_method(hunk))
 
 
 def extract_php_blocks(diff: str, prism_config: "PrismConfig | None" = None) -> list[dict]:
     """
-    Parse a unified diff and return one block per hunk for PHP files.
+    Parse a unified diff and return one block per PHP method (per hunk).
 
-    Each block includes context lines alongside added lines so the LLM has
-    full structural context (method signatures, class declarations, etc.).
-    Trivial hunks that only add imports, blank lines, or docblocks are skipped.
+    Each block includes context lines alongside added lines so the LLM sees
+    the full method structure. Trivial hunks (imports only) are skipped.
+    Multiple methods in one hunk are split into separate blocks.
     """
     blocks: list[dict] = []
     current_file: str | None = None
     current_hunk: "dict | None" = None
 
     for raw_line in diff.splitlines():
-        # ── new file header ───────────────────────────────────────────────────
+        # ── file deletion header (--- a/...) — signals end of previous file ──
+        if raw_line.startswith('--- '):
+            _flush_hunk(current_hunk, blocks)
+            current_hunk = None
+            current_file = None
+            continue
+
+        # ── file addition header (+++ b/...) — sets the current file ─────────
         file_match = re.match(r'^\+\+\+\s+b/(.+)$', raw_line)
         if file_match:
             _flush_hunk(current_hunk, blocks)
@@ -189,7 +248,7 @@ def extract_php_blocks(diff: str, prism_config: "PrismConfig | None" = None) -> 
             current_file = path
             continue
 
-        # ── hunk header ───────────────────────────────────────────────────────
+        # ── hunk header (@@ ... @@) ───────────────────────────────────────────
         hunk_match = re.match(r'^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@', raw_line)
         if hunk_match:
             _flush_hunk(current_hunk, blocks)
@@ -208,15 +267,15 @@ def extract_php_blocks(diff: str, prism_config: "PrismConfig | None" = None) -> 
         if current_hunk is None:
             continue
 
-        # ── diff body ─────────────────────────────────────────────────────────
-        if raw_line.startswith('+') and not raw_line.startswith('+++'):
+        # ── diff body lines ───────────────────────────────────────────────────
+        if raw_line.startswith('+'):
             ln = current_hunk["current_line"]
             current_hunk["lines"].append((ln, raw_line[1:], True))
             current_hunk["current_line"] += 1
-        elif raw_line.startswith('-') and not raw_line.startswith('---'):
-            pass  # removed lines: don't add to block, don't advance new-side counter
+        elif raw_line.startswith('-'):
+            pass  # removed lines: skip, don't advance new-side line counter
         else:
-            # context line (starts with ' ' or bare newline)
+            # context line (starts with ' ' or is bare empty line in diff)
             ln = current_hunk["current_line"]
             content = raw_line[1:] if raw_line.startswith(' ') else raw_line
             current_hunk["lines"].append((ln, content, False))
